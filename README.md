@@ -103,34 +103,42 @@ All via env / `.env` (see `.env.example`):
 | `TELEGRAM_BOT_TOKEN` | *(empty)* | Bật Telegram notifier khi có token |
 | `LLM_PROVIDER` | `cloudflare` | Provider cho agents |
 
-## Deployment — Render (API) + Cloudflare (LLM & UI) — miễn phí
+## Deployment — Hugging Face Spaces (Docker) + Neon Postgres — miễn phí, không cần thẻ
 
 ### Kiến trúc
-- **Render free web service** → `hermes.api:app` (FastAPI): toàn bộ pipeline qua HTTP
+- **HF Space (Docker SDK)** → `hermes.api:app` (uvicorn port 7860): full pipeline, giữ 100% feature (subprocess, file sandbox)
+- **Neon Postgres free** → task store qua `DATABASE_URL` (psycopg3 — đã hỗ trợ sẵn trong `TaskStore`)
 - **Cloudflare Workers AI** → LLM cho agents (free tier)
-- **Cloudflare Pages** → dashboard UI (`dashboard-ui/`), gọi API Render qua CORS
+- **Cloudflare Pages** → dashboard UI, gọi API qua CORS
 
-### Backend lên Render (Blueprint)
-1. Push repo lên GitHub (đã xong)
-2. Render Dashboard → **New → Blueprint** → chọn repo (đọc `render.yaml` tự động)
-3. Điền secrets khi được hỏi: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `TELEGRAM_BOT_TOKEN` (bỏ trống → mock notifier), `HERMES_API_TOKEN`
-4. Deploy → API tại `https://hermes-api.onrender.com`
+### Triển khai (5 phút)
+1. Tạo **Docker Space** tại huggingface.co/spaces (SDK = Docker, Blank)
+2. Space → **Settings → Variables and secrets**, thêm:
+   | Name | Value |
+   |---|---|
+   | `DATABASE_URL` | Neon connection string (`postgresql://...?sslmode=require`) |
+   | `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` | Workers AI credentials |
+   | `CLOUDFLARE_MODEL` | `@cf/meta/llama-3.1-8b-instruct` |
+   | `TELEGRAM_BOT_TOKEN` | (bỏ trống → mock notifier) |
+   | `HERMES_API_TOKEN` | token bảo vệ `POST /run` |
+3. Upload repo (hoặc kéo thả: `Dockerfile`, `pyproject.toml`, `README.md`, `src/`, `routing.json`)
+4. API live tại `https://<user>-<space>.hf.space` — check `/health`
+
+> Cấu hình Render Blueprint (`render.yaml`) vẫn giữ nguyên như phương án thay thế — cùng một image logic, chỉ đổi hạ tầng.
 
 ### API endpoints
 | Method | Path | Mô tả |
 |---|---|---|
+| `GET` | `/` | Service info |
 | `GET` | `/health` | Health check + mode (llm/notifier/projects) |
-| `POST` | `/run` | Chạy task full pipeline: `{text, project?, strategy? (fanout/pipeline/critic), user?}` — header `X-API-Token` nếu set `HERMES_API_TOKEN` |
+| `POST` | `/run` | Chạy task full pipeline: `{text, project?, strategy? (fanout/pipeline/critic), user?}` — header `X-API-Token` |
 | `GET` | `/tasks?limit=N` | Inbox (danh sách task) |
 | `GET` | `/tasks/{id}` | Chi tiết task + events (lifecycle audit) |
 
-### Frontend lên Cloudflare Pages
-1. Cloudflare Dashboard → **Workers & Pages → Create → Pages → Upload assets** (hoặc connect git, build output = `dashboard-ui/`)
-2. Mở site → điền API base URL + token → chạy task, xem inbox, chi tiết lifecycle events
-
-### Giới hạn free tier (đã biết)
-- ~~SQLite ephemeral~~ → **Đã giải quyết Phase 2**: Postgres instance `hermes-pg` (free 30 ngày) đã được tạo qua Render API; service dùng internal connection string qua env `HERMES_DATABASE_URL`
-- Free service sleep sau 15 phút idle → request đầu chậm ~30s (uptime monitor ping `/health` để giữ warm)
+### Giới hạn free tier
+- HF Space **ngủ sau 48h** không traffic (wake ~1-2 phút)
+- Container filesystem ephemeral — task data an toàn trong Neon; `sandbox/` reset khi restart (chỉ ảnh hưởng file demo)
+- Neon free: 0.5GB storage, idle-suspend (wake <1s)
 
 ## Secrets
 

@@ -48,6 +48,11 @@ class RunRequest(BaseModel):
     user: str = "local"
 
 
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "hermes-api", "docs": "/docs", "health": "/health"}
+
+
 @app.get("/health")
 def health():
     r = runtime()

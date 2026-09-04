@@ -24,7 +24,7 @@ class HermesRuntime:
         )
         configure_agents_llm(self.llm)
         self.router = RouterAgent(self.registry, classify=build_router_classifier(self.llm, self.registry.projects()))
-        self.store = TaskStore(settings.hermes_db_path)
+        self.store = TaskStore(settings.hermes_db_path, dsn=settings.hermes_database_url or None)
         self.notifier = SafeNotifier(build_notifier(settings.telegram_bot_token, self.registry))
 
     @property

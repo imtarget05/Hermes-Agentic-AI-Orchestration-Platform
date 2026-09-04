@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_allowed_users: str = ""
     hermes_db_path: str = "./hermes_tasks.db"
+    hermes_database_url: str = ""  # set → Postgres backend (psycopg3), else SQLite
     hermes_routing_path: str = "./routing.json"
     hermes_sandbox_dir: str = "./sandbox"
     max_retries: int = 3

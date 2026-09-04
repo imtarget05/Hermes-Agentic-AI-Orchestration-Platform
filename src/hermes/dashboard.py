@@ -9,7 +9,7 @@ app = FastAPI(title="Hermes Inbox")
 
 
 def _store() -> TaskStore:
-    return TaskStore(settings.hermes_db_path)
+    return TaskStore(settings.hermes_db_path, dsn=settings.hermes_database_url or None)
 
 
 @app.get("/tasks")

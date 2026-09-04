@@ -103,17 +103,19 @@ All via env / `.env` (see `.env.example`):
 | `TELEGRAM_BOT_TOKEN` | *(empty)* | Bật Telegram notifier khi có token |
 | `LLM_PROVIDER` | `cloudflare` | Provider cho agents |
 
-## Deployment — Hugging Face Spaces (Docker) + Neon Postgres — miễn phí, không cần thẻ
+## Deployment — Hugging Face Spaces (Gradio SDK) + Neon Postgres — miễn phí, không cần thẻ
 
 ### Kiến trúc
-- **HF Space (Docker SDK)** → `hermes.api:app` (uvicorn port 7860): full pipeline, giữ 100% feature (subprocess, file sandbox)
-- **Neon Postgres free** → task store qua `DATABASE_URL` (psycopg3 — đã hỗ trợ sẵn trong `TaskStore`)
+- **HF Space (Gradio SDK, free)** → `app.py` mount toàn bộ FastAPI (`hermes.api`) vào Gradio — **giữ 100% feature**: subprocess (`run_shell`), file sandbox, uvicorn port 7860
+- **Neon Postgres free** → task store qua `DATABASE_URL` (psycopg3 — hỗ trợ sẵn trong `TaskStore`)
 - **Cloudflare Workers AI** → LLM cho agents (free tier)
 - **Cloudflare Pages** → dashboard UI, gọi API qua CORS
 
 ### Triển khai (5 phút)
-1. Tạo **Docker Space** tại huggingface.co/spaces (SDK = Docker, Blank)
-2. Space → **Settings → Variables and secrets**, thêm:
+1. Tạo Space tại huggingface.co/new-space → SDK chọn **Gradio** (Blank)
+2. Upload các file này vào tab **Files** (Add file → Upload files):
+   `app.py`, `requirements.txt`, `space/README.md` (đổi tên thành `README.md`, thay thế README gốc của Space), thư mục `src/`, `routing.json`
+3. Space → **Settings → Variables and secrets**:
    | Name | Value |
    |---|---|
    | `DATABASE_URL` | Neon connection string (`postgresql://...?sslmode=require`) |
@@ -121,8 +123,10 @@ All via env / `.env` (see `.env.example`):
    | `CLOUDFLARE_MODEL` | `@cf/meta/llama-3.1-8b-instruct` |
    | `TELEGRAM_BOT_TOKEN` | (bỏ trống → mock notifier) |
    | `HERMES_API_TOKEN` | token bảo vệ `POST /run` |
-3. Upload repo (hoặc kéo thả: `Dockerfile`, `pyproject.toml`, `README.md`, `src/`, `routing.json`)
-4. API live tại `https://<user>-<space>.hf.space` — check `/health`
+4. Space tự build → API live tại `https://<user>-<space>.hf.space` — check `/health`, UI nhỏ tại `/gradio`, Swagger tại `/docs`
+
+> API endpoints không đổi so với thiết kế: `/health`, `/run`, `/tasks`, `/tasks/{id}`, `/docs`, `/gradio` (UI nhỏ).
+> `Dockerfile` + `render.yaml` giữ trong repo làm phương án thay thế (Render/Docker-host khác).
 
 > Cấu hình Render Blueprint (`render.yaml`) vẫn giữ nguyên như phương án thay thế — cùng một image logic, chỉ đổi hạ tầng.
 

@@ -5,6 +5,14 @@ Mounts the full FastAPI app (hermes.api) into a Gradio wrapper so the
 Space satisfies the Gradio SDK requirement while exposing every API
 route unchanged: /health, /run, /tasks, /tasks/{id}, /docs.
 """
+import os
+import sys
+
+# Make src/ importable without `pip install .` (avoids Space build backend issues)
+_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
 import gradio as gr
 
 from hermes.api import app as fastapi_app

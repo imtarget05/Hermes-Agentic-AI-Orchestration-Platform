@@ -1,0 +1,6 @@
+{
+  "projects": {
+    "default": {"channel": "@hermes_default", "thread_id": 0, "description": "Fallback project"},
+    "demo": {"channel": "7289290831", "thread_id": 0, "description": "Telegram 1-1 (Target)"}
+  }
+}

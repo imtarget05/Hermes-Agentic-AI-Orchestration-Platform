@@ -1,0 +1,15 @@
+.env
+*.db
+*.db-journal
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+mock_notifier.log
+.hermes/
+.DS_Store

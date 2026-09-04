@@ -11,5 +11,6 @@ build/
 .pytest_cache/
 .ruff_cache/
 mock_notifier.log
+*.log
 .hermes/
 .DS_Store

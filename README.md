@@ -96,7 +96,8 @@ All via env / `.env` (see `.env.example`):
 
 | Var | Mặc định | Ý nghĩa |
 |---|---|---|
-| `HERMES_DB_PATH` | `./hermes_tasks.db` | SQLite task store |
+| `HERMES_DB_PATH` | `./hermes_tasks.db` | SQLite task store (dùng khi không có Postgres) |
+| `HERMES_DATABASE_URL` | *(empty)* | Postgres DSN (psycopg3) — set trên Render → dùng Postgres thay SQLite |
 | `HERMES_ROUTING_PATH` | `./routing.json` | Project→channel→thread registry |
 | `HERMES_SANDBOX_DIR` | `./sandbox` | Working dir cho file tools |
 | `TELEGRAM_BOT_TOKEN` | *(empty)* | Bật Telegram notifier khi có token |
@@ -128,7 +129,7 @@ All via env / `.env` (see `.env.example`):
 2. Mở site → điền API base URL + token → chạy task, xem inbox, chi tiết lifecycle events
 
 ### Giới hạn free tier (đã biết)
-- SQLite trên Render **ephemeral**: data mất khi redeploy/restart → Phase 2: Postgres
+- ~~SQLite ephemeral~~ → **Đã giải quyết Phase 2**: Postgres instance `hermes-pg` (free 30 ngày) đã được tạo qua Render API; service dùng internal connection string qua env `HERMES_DATABASE_URL`
 - Free service sleep sau 15 phút idle → request đầu chậm ~30s (uptime monitor ping `/health` để giữ warm)
 
 ## Secrets

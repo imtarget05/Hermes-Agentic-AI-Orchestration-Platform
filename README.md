@@ -102,6 +102,35 @@ All via env / `.env` (see `.env.example`):
 | `TELEGRAM_BOT_TOKEN` | *(empty)* | Bật Telegram notifier khi có token |
 | `LLM_PROVIDER` | `cloudflare` | Provider cho agents |
 
+## Deployment — Render (API) + Cloudflare (LLM & UI) — miễn phí
+
+### Kiến trúc
+- **Render free web service** → `hermes.api:app` (FastAPI): toàn bộ pipeline qua HTTP
+- **Cloudflare Workers AI** → LLM cho agents (free tier)
+- **Cloudflare Pages** → dashboard UI (`dashboard-ui/`), gọi API Render qua CORS
+
+### Backend lên Render (Blueprint)
+1. Push repo lên GitHub (đã xong)
+2. Render Dashboard → **New → Blueprint** → chọn repo (đọc `render.yaml` tự động)
+3. Điền secrets khi được hỏi: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `TELEGRAM_BOT_TOKEN` (bỏ trống → mock notifier), `HERMES_API_TOKEN`
+4. Deploy → API tại `https://hermes-api.onrender.com`
+
+### API endpoints
+| Method | Path | Mô tả |
+|---|---|---|
+| `GET` | `/health` | Health check + mode (llm/notifier/projects) |
+| `POST` | `/run` | Chạy task full pipeline: `{text, project?, strategy? (fanout/pipeline/critic), user?}` — header `X-API-Token` nếu set `HERMES_API_TOKEN` |
+| `GET` | `/tasks?limit=N` | Inbox (danh sách task) |
+| `GET` | `/tasks/{id}` | Chi tiết task + events (lifecycle audit) |
+
+### Frontend lên Cloudflare Pages
+1. Cloudflare Dashboard → **Workers & Pages → Create → Pages → Upload assets** (hoặc connect git, build output = `dashboard-ui/`)
+2. Mở site → điền API base URL + token → chạy task, xem inbox, chi tiết lifecycle events
+
+### Giới hạn free tier (đã biết)
+- SQLite trên Render **ephemeral**: data mất khi redeploy/restart → Phase 2: Postgres
+- Free service sleep sau 15 phút idle → request đầu chậm ~30s (uptime monitor ping `/health` để giữ warm)
+
 ## Secrets
 
 Never commit `.env` or `*.db` (both are in `.gitignore`). Tokens via env only: `CLOUDFLARE_API_TOKEN`, `TELEGRAM_BOT_TOKEN`.

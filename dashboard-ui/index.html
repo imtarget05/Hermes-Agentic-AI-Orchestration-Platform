@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes — Dashboard</title>
+<style>
+  :root { --bg:#0b1020; --card:#141a30; --acc:#4f8cff; --ok:#2ecc71; --err:#e74c3c; --tx:#e8ecf8; --mut:#8b93ad; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--tx); font:15px/1.5 system-ui,sans-serif; padding:24px; max-width:960px; margin:auto; }
+  h1 { font-size:22px; margin-bottom:4px; }
+  .mut { color:var(--mut); font-size:13px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; margin:14px 0; }
+  input, select, textarea { width:100%; background:#0e142a; color:var(--tx); border:1px solid #2a3358; border-radius:8px; padding:9px 11px; font:inherit; }
+  textarea { min-height:72px; resize:vertical; }
+  label { display:block; font-size:12px; color:var(--mut); margin:10px 0 4px; }
+  button { background:var(--acc); color:#fff; border:0; border-radius:8px; padding:10px 18px; font:inherit; font-weight:600; cursor:pointer; margin-top:12px; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .task { border-top:1px solid #232b4d; padding:10px 0; cursor:pointer; }
+  .task:first-child { border-top:0; }
+  .badge { font-size:11px; padding:2px 8px; border-radius:99px; background:#20284a; }
+  .badge.completed { color:var(--ok); } .badge.failed, .badge.failure { color:var(--err); }
+  .badge.running { color:var(--acc); }
+  pre { white-space:pre-wrap; word-break:break-word; background:#0e142a; padding:12px; border-radius:8px; font-size:13px; margin-top:8px; }
+  #status { margin-top:10px; font-size:13px; }
+  .ok { color:var(--ok); } .err { color:var(--err); }
+  details summary { cursor:pointer; }
+</style>
+</head>
+<body>
+<h1>⚡ Hermes — Agentic AI Orchestration</h1>
+<p class="mut">Gateway → Router → Orchestrator (fanout · pipeline · critic) → Agents → Tools → Telegram</p>
+
+<div class="card">
+  <label>API base URL (Render)</label>
+  <input id="base" placeholder="https://hermes-api.onrender.com">
+  <label>API token (HERMES_API_TOKEN — để trống nếu chưa set)</label>
+  <input id="token" type="password" placeholder="••••••">
+  <label>Task</label>
+  <textarea id="text" placeholder="VD: research cloudflare workers AI free tier"></textarea>
+  <div class="row">
+    <div><label>Strategy</label>
+      <select id="strategy">
+        <option value="fanout">fanout (parallel)</option>
+        <option value="pipeline">pipeline (sequential)</option>
+        <option value="critic">critic (debate)</option>
+      </select></div>
+    <div><label>Project (hint — để trống để router tự chọn)</label>
+      <input id="project" placeholder="demo"></div>
+  </div>
+  <button id="runBtn" onclick="run()">▶ Run task</button>
+  <div id="status"></div>
+  <pre id="result" style="display:none"></pre>
+</div>
+
+<div class="card">
+  <b>Inbox</b> <button style="padding:4px 12px;margin:0 0 0 8px" onclick="loadTasks()">↻ Refresh</button>
+  <div id="tasks" style="margin-top:8px"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const base = () => $('base').value.trim().replace(/\/$/, '');
+const headers = () => { const h = {'Content-Type':'application/json'}; if ($('token').value) h['X-API-Token'] = $('token').value; return h; };
+
+async function run() {
+  const btn = $('runBtn'); btn.disabled = true;
+  $('status').textContent = '⏳ Đang chạy pipeline (LLM có thể mất 10–60s — lần đầu free tier cần ~30s wake-up)...';
+  $('result').style.display = 'none';
+  try {
+    const r = await fetch(base() + '/run', {
+      method: 'POST', headers: headers(),
+      body: JSON.stringify({ text: $('text').value, project: $('project').value, strategy: $('strategy').value })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || r.statusText);
+    $('status').innerHTML = `<span class="ok">✅ Task ${j.task.id} — ${j.task.status}</span>`;
+    $('result').textContent = j.task.result || '(no result)';
+    $('result').style.display = 'block';
+    loadTasks();
+  } catch (e) {
+    $('status').innerHTML = `<span class="err">❌ ${e.message}</span>`;
+  } finally { btn.disabled = false; }
+}
+
+async function loadTasks() {
+  try {
+    const r = await fetch(base() + '/tasks?limit=20', { headers: headers() });
+    const list = await r.json();
+    $('tasks').innerHTML = list.length ? list.map(t =>
+      `<div class="task" onclick="showTask('${t.id}')">
+         <span class="badge ${t.status}">${t.status}</span>
+         <b>${t.id}</b> <span class="mut">${t.project}/${t.strategy}</span>
+         <div class="mut">${(t.text||'').slice(0,90)}</div>
+       </div>`).join('') : '<span class="mut">Chưa có task nào.</span>';
+  } catch (e) { $('tasks').innerHTML = `<span class="err">Không tải được: ${e.message}</span>`; }
+}
+
+async function showTask(id) {
+  const r = await fetch(base() + '/tasks/' + id, { headers: headers() });
+  const j = await r.json();
+  $('result').textContent = 'RESULT:\n' + (j.task.result || '(none)') +
+    '\n\nEVENTS:\n' + j.events.map(e => `[${e.from} → ${e.to}] ${e.actor}: ${e.note}`).join('\n');
+  $('result').style.display = 'block';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// prefill API base if deployed under known URL
+if (location.hostname.endsWith('.pages.dev')) $('base').value = 'https://hermes-api.onrender.com';
+loadTasks();
+</script>
+</body>
+</html>

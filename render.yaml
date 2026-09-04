@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: hermes-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -e ".[dev]"
+    startCommand: uvicorn hermes.api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: HERMES_DB_PATH
+        value: ./hermes_tasks.db
+      - key: HERMES_ROUTING_PATH
+        value: ./routing.json
+      - key: HERMES_SANDBOX_DIR
+        value: ./sandbox
+      - key: LLM_PROVIDER
+        value: cloudflare
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false      # set in Render Dashboard (secret)
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false      # set in Render Dashboard (secret)
+      - key: CLOUDFLARE_MODEL
+        value: "@cf/meta/llama-3.1-8b-instruct"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false      # set in Render Dashboard (secret) — mock notifier if empty
+      - key: HERMES_API_TOKEN
+        sync: false      # set in Render Dashboard (secret) — protects POST /run
+      - key: HERMES_CORS_ORIGINS
+        value: "*"       # tighten to your Pages domain after first deploy

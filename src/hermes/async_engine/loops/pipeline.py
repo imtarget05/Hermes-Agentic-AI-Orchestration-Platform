@@ -80,16 +80,29 @@ def run_agent_workflow(
 
 
 def _default_handlers() -> dict[str, Callable[[Any], str]]:
-    """Deterministic agent handlers (LLM stub-mode, same as Project 2 agents)."""
+    """Deterministic agent handlers (LLM stub-mode, same as Project 2 agents).
+
+    Procurement handlers are store-aware; the generic fallback below covers
+    legacy research/analyze/report/notify graphs. Procurement runs should pass
+    `build_procurement_handlers(store)` explicitly so join nodes read siblings.
+    """
     import time
 
     def _agent(task, kind):
         time.sleep(0.01)
         return f"s3://hermes/{kind}/{task.task_id}"
 
-    return {
+    try:
+        from ...procurement.handlers import build_procurement_handlers as _build_proc
+        proc = _build_proc(None)
+    except Exception:
+        proc = {}
+
+    handlers = {
         "research": lambda t: _agent(t, "research"),
         "analyze": lambda t: _agent(t, "analyze"),
         "report": lambda t: _agent(t, "report"),
         "notify": lambda t: _agent(t, "notify"),
     }
+    handlers.update(proc)
+    return handlers

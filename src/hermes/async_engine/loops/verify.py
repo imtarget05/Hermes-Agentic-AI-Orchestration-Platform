@@ -57,6 +57,39 @@ def contains_check(needle: str) -> Validator:
 DEFAULT_VALIDATORS: list[Validator] = [schema_check]
 
 
+def procurement_evidence_check(result: str) -> str:
+    """Recommendation must be evidence-grounded: vendor + reasons with evidence_refs."""
+    import json as _json
+    if "VERIFICATION FAILED" in (result or ""):
+        return "quality check: upstream verification failed"
+    try:
+        data = _json.loads(result) if isinstance(result, str) else None
+    except Exception:
+        data = None
+    if not isinstance(data, dict) or "vendor" not in data:
+        # verification agent outputs "VERIFICATION PASSED\n..." text — accept if passed
+        if "VERIFICATION PASSED" in (result or ""):
+            return ""
+        return "quality check: recommendation is not grounded Recommendation JSON"
+    if not data.get("vendor"):
+        return "quality check: recommendation has no vendor"
+    reasons = data.get("reasons") or []
+    if not reasons:
+        return "quality check: recommendation has no reasons"
+    for r in reasons:
+        if not (r.get("evidence_ref") if isinstance(r, dict) else False):
+            return f"quality check: claim without evidence: {str(r)[:80]}"
+    if not data.get("evidence_refs"):
+        return "quality check: recommendation has no evidence_refs"
+    return ""
+
+
+PROCUREMENT_VALIDATORS: dict[str, list[Validator]] = {
+    "verification": [procurement_evidence_check],
+    "analysis": [procurement_evidence_check],
+}
+
+
 class Verifier:
     """Runs a validator chain; first failure wins (fail fast, fail loudly)."""
 

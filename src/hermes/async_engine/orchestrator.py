@@ -30,7 +30,8 @@ from .contract import (
 from .dag import TaskDAG, build_dag
 from .worker import Worker, WorkerPool
 
-DEFAULT_TASK_TYPES = ("research", "analyze", "report", "notify")
+DEFAULT_TASK_TYPES = ("research", "analyze", "report", "notify",
+                        "price", "vendor", "contract", "spec", "analysis", "verification")
 VALID_TASK_TYPES = set(DEFAULT_TASK_TYPES)
 
 

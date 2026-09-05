@@ -88,7 +88,123 @@ class ToolExecutor:
                 time.sleep(min(2 ** attempts * 0.05, 1.0))
 
 
-# ---- MVP tools ----
+# ---- Procurement domain tools (Enterprise Procurement Case Agent) ----
+import json as _json
+import os as _os
+
+
+def _approved_vendors_path() -> str:
+    here = Path(__file__).resolve()
+    # src/hermes/tools/__init__.py → src/hermes/procurement/vendors.json
+    candidate = here.parent.parent / "procurement" / "vendors.json"
+    if candidate.exists():
+        return str(candidate)
+    return _os.environ.get("HERMES_VENDORS_PATH", "./vendors.json")
+
+
+def _parse_quote_text(text: str, source_uri: str = "") -> dict:
+    t = text or ""
+    low = t.lower()
+    vendor = ""
+    for v in ("lenovo", "dell", "hp"):
+        if v in low:
+            vendor = v.capitalize()
+            break
+    m = re.search(r"\$\s?([\d,]+(?:\.\d+)?)", t)
+    unit = float(m.group(1).replace(",", "")) if m else 0.0
+    mq = re.search(r"(\d+)\s*(?:laptops?|units?|qty|quantity)", low)
+    qty = int(mq.group(1)) if mq else 0
+    totals = [float(x.replace(",", "")) for x in re.findall(r"\$\s?([\d,]+(?:\.\d+)?)", t)]
+    total = max(totals) if totals else unit * qty
+    if qty and unit and not totals:
+        total = unit * qty
+    return {"vendor": vendor, "unit_price": unit, "quantity": qty,
+            "total": total, "source_uri": source_uri, "raw_text": t[:4000]}
+
+
+@register_tool("parse_quote_pdf", permission="general", retryable=False,
+               description="Parse a vendor quote PDF inside sandbox → Quote JSON")
+def parse_quote_pdf(path: str, sandbox: str = "./sandbox") -> str:
+    guard_input(path)
+    base = Path(sandbox).resolve()
+    target = (base / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+    if not str(target).startswith(str(base)):
+        raise FatalToolError("parse_quote_pdf: path outside sandbox")
+    if not target.exists():
+        raise FatalToolError(f"parse_quote_pdf: not found: {path}")
+    try:
+        from pypdf import PdfReader
+    except Exception as e:
+        raise FatalToolError(f"parse_quote_pdf: pypdf missing (pip install pypdf): {e}")
+    try:
+        reader = PdfReader(str(target))
+        text = "\n".join((p.extract_text() or "") for p in reader.pages)
+    except Exception as e:
+        raise FatalToolError(f"parse_quote_pdf: unreadable PDF: {e}")
+    if not text.strip():
+        raise FatalToolError("parse_quote_pdf: no extractable text (scanned image PDF needs OCR)")
+    return _json.dumps(_parse_quote_text(text, source_uri=path))
+
+
+@register_tool("compare_prices", permission="procurement_price", description="Compare Quote JSON list → ranked totals")
+def compare_prices(quotes_json: str) -> str:
+    try:
+        quotes = _json.loads(quotes_json)
+    except Exception as e:
+        raise FatalToolError(f"compare_prices: invalid quotes JSON: {e}")
+    if not isinstance(quotes, list) or not quotes:
+        raise FatalToolError("compare_prices: empty quote list")
+    ranked = sorted(quotes, key=lambda q: float(q.get("total", 0) or 0))
+    lines = [f"{q.get('vendor','?')}: ${float(q.get('total',0)):,.0f} "
+             f"(${float(q.get('unit_price',0)):,.0f} x {q.get('quantity',0)})" for q in ranked]
+    return "PRICE RANKING (lowest first):\n" + "\n".join(lines) + f"\nLOWEST: {ranked[0].get('vendor','')}"
+
+
+@register_tool("check_approved_vendor", permission="procurement_vendor",
+               description="Check vendor against approved list → VendorStatus JSON")
+def check_approved_vendor(vendor: str, vendors_path: str = "") -> str:
+    guard_input(vendor)
+    vp = vendors_path or _approved_vendors_path()
+    try:
+        data = _json.loads(Path(vp).read_text())
+        approved_map = {k.lower(): bool(v) for k, v in (data.get("approved_vendors") or {}).items()}
+        notes = data.get("notes") or {}
+    except Exception:
+        approved_map, notes = {"lenovo": True, "dell": True, "hp": False}, {}
+    key = (vendor or "").strip().lower()
+    approved = approved_map.get(key, False)
+    note = notes.get(key, "Approved Vendor ✓" if approved else "Not approved ✗")
+    return _json.dumps({"vendor": vendor, "approved": approved, "note": note})
+
+
+@register_tool("extract_contract_terms", permission="procurement_contract",
+               description="Extract payment/warranty/SLA from quote text → ContractTerms JSON")
+def extract_contract_terms(quote_text: str, vendor: str = "", source_uri: str = "") -> str:
+    t = quote_text or ""
+    mp = re.search(r"net\s*(\d+)", t, re.IGNORECASE)
+    payment = f"Net {mp.group(1)}" if mp else ""
+    mw = re.search(r"(\d+(?:\.\d+)?)\s*years?\s*warranty", t, re.IGNORECASE)
+    warranty = float(mw.group(1)) if mw else 0.0
+    ms = re.search(r"(\d+(?:\.\d+)?)\s*hours?\b.*?sla|sla.*?(\d+(?:\.\d+)?)\s*hours?", t, re.IGNORECASE)
+    sla = 0.0
+    if ms:
+        sla = float(next(g for g in ms.groups() if g))
+    return _json.dumps({"vendor": vendor, "payment": payment, "warranty_years": warranty,
+                        "sla_hours": sla, "source_uri": source_uri})
+
+
+@register_tool("score_spec", permission="procurement_spec",
+               description="Score quote spec vs required spec → SpecScore JSON")
+def score_spec(quote_text: str, required_spec: str = "", vendor: str = "") -> str:
+    q, r = (quote_text or "").lower(), (required_spec or "").lower()
+    keywords = [w for w in re.findall(r"[a-z0-9]+", r) if len(w) > 2]
+    if not keywords:
+        keywords = ["cpu", "ram", "ssd", "display", "warranty"]
+    hits = sum(1 for k in keywords if k in q)
+    score = round(hits / max(1, len(keywords)) * 100, 1)
+    return _json.dumps({"vendor": vendor, "score": score,
+                        "meets_minimum": score >= 50.0,
+                        "notes": f"{hits}/{len(keywords)} spec keywords matched"})
 
 @register_tool("web_search", permission="research", description="Mockable web search")
 def web_search(query: str, mock: str = "") -> str:

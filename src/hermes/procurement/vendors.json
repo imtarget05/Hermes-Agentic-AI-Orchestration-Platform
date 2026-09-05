@@ -1,0 +1,12 @@
+{
+  "approved_vendors": {
+    "lenovo": true,
+    "dell": true,
+    "hp": false
+  },
+  "notes": {
+    "lenovo": "Approved Vendor",
+    "dell": "Approved Vendor",
+    "hp": "Not approved — removed from approved list Q2"
+  }
+}

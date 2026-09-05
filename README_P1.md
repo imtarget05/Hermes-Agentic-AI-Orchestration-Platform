@@ -99,7 +99,12 @@ src/hermes/async_engine/
     reliability.py Loop 6 — timeout · circuit breaker · escalation
     evaluate.py    Loop 7 — latency/success/quality/worker efficiency
     audit.py       Loop 8 — failure-pattern mining → policy feedback into loop 2
-    pipeline.py    run_agent_workflow() — all 8 loops end-to-end
+        pipeline.py    run_agent_workflow() — all 8 loops end-to-end
+  guardrails.py    Input/Output/Tool-call guardrails (injection · size · safety · redaction)
+  policy.py        Risk-based policy: ALLOW / DENY / REQUIRE_APPROVAL
+  hitl.py          Human-in-the-loop approval store (SQLite) + auto-approve mode
+  llm/
+    gateway.py     ModelGateway — multi-provider fallback (OpenAI/Anthropic/HF/Cloudflare)
 ---
 
 ## 4. Worker lifecycle with manual ACK (§5)
@@ -277,3 +282,7 @@ prometheus-client) for the real broker path.
 | Docker Compose full stack        | `docker-compose.yml`                        | ✅   |
 | Unit test                        | `tests/test_async_*.py`                     | ✅   |
 | Integration test                 | `tests/test_async_integration.py` (gated)   | ✅   |
+| Guardrails (input/output/tool)   | `loops/guardrails.py`                       | ✅   |
+| Policy Engine (ALLOW/DENY/APPR)  | `loops/policy.py`                           | ✅   |
+| Human-in-the-loop approval       | `loops/hitl.py` (SQLite + auto-approve)     | ✅   |
+| Model Gateway (multi-provider)    | `llm/gateway.py`                            | ✅   |

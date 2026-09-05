@@ -12,12 +12,32 @@ import json
 import re
 from typing import Any
 
-VALID_TASK_TYPES = ("research", "analyze", "report", "notify")
+VALID_TASK_TYPES = ("research", "analyze", "report", "notify",
+                          "price", "vendor", "contract", "spec", "analysis", "verification")
+
+PROCUREMENT_KEYWORDS = ("procurement", "laptop", "quote", "báo giá", "vendor",
+                        "purchase", "mua sắm", "supplier", "warranty", "slas", "sla")
 
 # Learning-loop (loop 8) feedback: per-task-type retry budget adjustments.
 DEFAULT_MAX_ATTEMPTS: dict[str, int] = {
     "research": 3, "analyze": 3, "report": 3, "notify": 2,
+    "price": 3, "vendor": 2, "contract": 3, "spec": 3,
+    "analysis": 2, "verification": 2,
 }
+
+
+def procurement_dag() -> list[dict[str, Any]]:
+    """Enterprise Procurement Case Agent DAG: 4 parallel → analysis → verification."""
+    return [
+        {"task_id": "price-1", "task_type": "price", "deps": []},
+        {"task_id": "vendor-1", "task_type": "vendor", "deps": []},
+        {"task_id": "contract-1", "task_type": "contract", "deps": []},
+        {"task_id": "spec-1", "task_type": "spec", "deps": []},
+        {"task_id": "analysis-1", "task_type": "analysis",
+         "deps": ["price-1", "vendor-1", "contract-1", "spec-1"]},
+        {"task_id": "verification-1", "task_type": "verification",
+         "deps": ["analysis-1"]},
+    ]
 
 
 class Planner:
@@ -30,6 +50,8 @@ class Planner:
     # -- deterministic templates (fallback + tests) ---------------------- #
     def _template(self, request: str) -> list[dict[str, Any]]:
         low = request.lower()
+        if any(k in low for k in PROCUREMENT_KEYWORDS):
+            return procurement_dag()
         if any(k in low for k in ("compare", "versus", " vs ", "multiple", "diverse")):
             # fan-out: two parallel analyze branches then join (spec §9 shape)
             return [
@@ -58,8 +80,10 @@ class Planner:
             return None
         prompt = (
             "Decompose this request into a task DAG. Reply ONLY with JSON: "
-            '[{"task_id": str, "task_type": research|analyze|report|notify, '
-            '"deps": [task_id]}]. Request: ' + request
+            '[{"task_id": str, "task_type": research|analyze|report|notify|price|vendor|contract|spec|analysis|verification, '
+            '"deps": [task_id]}]. For procurement/purchase/quote requests use: '
+            "price-1, vendor-1, contract-1, spec-1 (no deps) → analysis-1 "
+            "(deps: all four) → verification-1 (dep: analysis-1). Request: " + request
         )
         try:
             raw = str(self.llm(prompt))

@@ -115,6 +115,15 @@ ROUTING: dict[str, tuple[str, str, str]] = {
     "analyze": (EXCHANGE_TASKS, "agent.analyze", "q.agent.analyze"),
     "report": (EXCHANGE_TASKS, "agent.report", "q.agent.report"),
     "notify": (EXCHANGE_TASKS, "agent.notify", "q.agent.notify"),
+    # Enterprise Procurement Case Agent — 4 parallel + join + verify
+    "price": (EXCHANGE_TASKS, "agent.price", "q.agent.price"),
+    "vendor": (EXCHANGE_TASKS, "agent.vendor", "q.agent.vendor"),
+    "contract": (EXCHANGE_TASKS, "agent.contract", "q.agent.contract"),
+    "spec": (EXCHANGE_TASKS, "agent.spec", "q.agent.spec"),
+    "analysis": (EXCHANGE_TASKS, "agent.analysis", "q.agent.analysis"),
+    "verification": (EXCHANGE_TASKS, "agent.verification", "q.agent.verification"),
 }
+
+PROCUREMENT_TASK_TYPES = ("price", "vendor", "contract", "spec", "analysis", "verification")
 
 DEAD_LETTER_QUEUE = "q.agent.deadletter"

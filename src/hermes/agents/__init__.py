@@ -127,50 +127,53 @@ class AnalysisAgent(BaseAgent):
         return json.dumps(rec)
 
     @staticmethod
+    def _json_objects(ctx: str, max_window: int = 6000) -> list[dict]:
+        out: list[dict] = []
+        i, n = 0, len(ctx)
+        while i < n:
+            start = ctx.find("{", i)
+            if start == -1:
+                break
+            depth, end = 0, -1
+            for j in range(start, min(n, start + max_window)):
+                if ctx[j] == "{":
+                    depth += 1
+                elif ctx[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = j + 1
+                        break
+            if end == -1:
+                i = start + 1
+                continue
+            try:
+                data = json.loads(ctx[start:end])
+                if isinstance(data, dict):
+                    out.append(data)
+            except Exception:
+                pass
+            i = end
+        return out
+
+    @staticmethod
     def _quotes_from_ctx(ctx: str) -> list[dict]:
-        quotes: list[dict] = []
-        for line in ctx.splitlines():
-            s = line.strip()
-            if s.startswith("[") and "vendor" in s and "total" in s:
-                try:
-                    data = json.loads(s)
-                    if isinstance(data, list):
-                        quotes.extend(data)
-                    elif isinstance(data, dict):
-                        quotes.append(data)
-                except Exception:
-                    continue
-        return quotes
+        return [o for o in AnalysisAgent._json_objects(ctx)
+                if o.get("vendor") and ("total" in o) and ("unit_price" in o)]
 
     @staticmethod
     def _approved_from_ctx(ctx: str) -> dict[str, bool]:
         out: dict[str, bool] = {}
-        for line in ctx.splitlines():
-            s = line.strip()
-            if '"approved"' in s and '"vendor"' in s:
-                try:
-                    start = s.find("{")
-                    data = json.loads(s[start:])
-                    if isinstance(data, dict) and data.get("vendor"):
-                        out[str(data["vendor"])] = bool(data.get("approved"))
-                except Exception:
-                    continue
-        # also handle bare lowercase keys from tools
+        for o in AnalysisAgent._json_objects(ctx):
+            if o.get("vendor") is not None and "approved" in o:
+                out[str(o["vendor"])] = bool(o["approved"])
         return out
 
     @staticmethod
     def _terms_from_ctx(ctx: str) -> dict[str, dict]:
         out: dict[str, dict] = {}
-        for line in ctx.splitlines():
-            s = line.strip()
-            if '"warranty_years"' in s:
-                try:
-                    start = s.find("{")
-                    data = json.loads(s[start:])
-                    if isinstance(data, dict) and data.get("vendor"):
-                        out[str(data["vendor"])] = data
-                except Exception:
-                    continue
+        for o in AnalysisAgent._json_objects(ctx):
+            if o.get("vendor") and "warranty_years" in o:
+                out[str(o["vendor"])] = o
         return out
 
 

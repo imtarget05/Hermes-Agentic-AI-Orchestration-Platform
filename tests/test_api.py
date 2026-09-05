@@ -1,4 +1,4 @@
-"""HTTP API tests — full feature parity: run (all strategies), inbox, auth."""
+"""HTTP API tests — procurement pipeline: run, recommendation, approvals, inbox, auth."""
 from __future__ import annotations
 
 import pytest
@@ -14,6 +14,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "hermes_routing_path", "routing.json")
     monkeypatch.setattr(settings, "telegram_bot_token", "")
     monkeypatch.setattr(settings, "llm_provider", "stub")  # deterministic tests (no live LLM)
+    monkeypatch.setenv("HERMES_PROCUREMENT_DB", str(tmp_path / "p.db"))
+    monkeypatch.setenv("HERMES_HITL_AUTO_APPROVE", "true")
     api._runtime = None
     return TestClient(api.app)
 
@@ -27,19 +29,37 @@ def test_health(client):
     assert "default" in body["projects"]
 
 
-@pytest.mark.parametrize("strategy", ["fanout", "pipeline", "critic"])
-def test_run_all_strategies(client, strategy):
-    r = client.post("/run", json={"text": f"hello {strategy}", "project": "demo", "strategy": strategy})
+def test_procurement_run_recommends_lenovo(client):
+    r = client.post("/procurement/run", json={
+        "text": "Công ty cần mua 50 laptop cho team Engineering",
+        "project": "demo",
+    })
     assert r.status_code == 200
     body = r.json()
     assert body["task"]["status"] == "completed"
-    assert body["task"]["result"]
+    rec = body["recommendation"]
+    assert rec["vendor"] == "Lenovo"
+    assert rec["total_cost"] == 54000.0
+    assert rec["reasons"] and rec["evidence_refs"]
     assert [e["to"] for e in body["events"]][0] == "queued"
 
 
-def test_run_invalid_strategy(client):
-    r = client.post("/run", json={"text": "x", "strategy": "bogus"})
-    assert r.status_code == 422
+def test_legacy_run_maps_to_procurement(client):
+    # legacy strategy names are mapped to the procurement pipeline
+    r = client.post("/run", json={"text": "hello", "project": "demo", "strategy": "fanout"})
+    assert r.status_code == 200
+    assert r.json()["task"]["status"] == "completed"
+    assert r.json()["recommendation"]["vendor"] == "Lenovo"
+
+
+def test_approval_flow(client):
+    r = client.post("/procurement/run", json={"text": "mua 50 laptop", "project": "demo"})
+    assert r.status_code == 200
+    pending = client.get("/procurement/approvals/pending").json()["pending"]
+    assert pending == []  # auto-approved in tests
+    resolve = client.post("/procurement/approvals/does-not-exist/resolve",
+                          json={"approved": True})
+    assert resolve.status_code == 404
 
 
 def test_list_and_get_task(client):

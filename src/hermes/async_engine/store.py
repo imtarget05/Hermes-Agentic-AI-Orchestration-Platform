@@ -73,7 +73,9 @@ class _Backend:
             import psycopg
             self._connect = lambda: psycopg.connect(dsn)
         else:
-            self._connect = lambda: sqlite3.connect(db_path)
+            # timeout=30: WorkerPool threads share one SQLite file; busy-wait
+            # instead of failing fast with "database is locked".
+            self._connect = lambda: sqlite3.connect(db_path, timeout=30.0)
 
     def init(self) -> None:
         con = self._connect()

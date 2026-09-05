@@ -9,6 +9,8 @@ a tool, and what happens on failure?
 """
 from __future__ import annotations
 
+import json as _json
+import os as _os
 import re
 import subprocess
 import time
@@ -89,8 +91,6 @@ class ToolExecutor:
 
 
 # ---- Procurement domain tools (Enterprise Procurement Case Agent) ----
-import json as _json
-import os as _os
 
 
 def _approved_vendors_path() -> str:
@@ -106,14 +106,19 @@ def _parse_quote_text(text: str, source_uri: str = "") -> dict:
     t = text or ""
     low = t.lower()
     vendor = ""
-    for v in ("lenovo", "dell", "hp"):
+    for v, canonical in (("lenovo", "Lenovo"), ("dell", "Dell"), ("hp", "HP")):
         if v in low:
-            vendor = v.capitalize()
+            vendor = canonical
             break
     m = re.search(r"\$\s?([\d,]+(?:\.\d+)?)", t)
     unit = float(m.group(1).replace(",", "")) if m else 0.0
-    mq = re.search(r"(\d+)\s*(?:laptops?|units?|qty|quantity)", low)
-    qty = int(mq.group(1)) if mq else 0
+    qty = 0
+    for pat in (r"quantity:\s*(\d+)", r"qty:\s*(\d+)",
+                r"(\d+)\s+laptops?", r"(\d+)\s+units?"):
+        mq = re.search(pat, low)
+        if mq:
+            qty = int(mq.group(1))
+            break
     totals = [float(x.replace(",", "")) for x in re.findall(r"\$\s?([\d,]+(?:\.\d+)?)", t)]
     total = max(totals) if totals else unit * qty
     if qty and unit and not totals:
@@ -144,6 +149,21 @@ def parse_quote_pdf(path: str, sandbox: str = "./sandbox") -> str:
     if not text.strip():
         raise FatalToolError("parse_quote_pdf: no extractable text (scanned image PDF needs OCR)")
     return _json.dumps(_parse_quote_text(text, source_uri=path))
+
+
+@register_tool("retrieve_evidence", permission="general",
+               description="RAG retrieval over the case index (quotes + vendors + spec) → cited chunks")
+def retrieve_evidence(query: str, top_k: int = 3, index_path: str = "") -> str:
+    guard_input(query or "")
+    path = index_path or _os.environ.get("HERMES_RAG_INDEX", "")
+    if not path:
+        raise FatalToolError("retrieve_evidence: no index (HERMES_RAG_INDEX unset)")
+    from ..rag import RagIndex, format_hits
+    index = RagIndex.load(path)
+    if not len(index):
+        raise FatalToolError(f"retrieve_evidence: empty index at {path}")
+    hits = index.query(query, top_k=max(1, min(10, int(top_k or 3))))
+    return format_hits(hits)
 
 
 @register_tool("compare_prices", permission="procurement_price", description="Compare Quote JSON list → ranked totals")

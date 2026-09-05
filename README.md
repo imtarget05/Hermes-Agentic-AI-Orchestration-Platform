@@ -1,55 +1,56 @@
-# Hermes — Agentic AI Orchestration Platform
+# Hermes — Production Multi-Agent / Multi-Agent RAG Platform
+## Enterprise Procurement Case Agent (50 laptops · 3 quotes → recommendation)
 
-Agentic AI runtime: **Gateway/Router → Orchestrator → specialized agents → tools → task-state → Notifier (Telegram / mock / API)**.
-
-Spec: [`02_AGENTIC_MULTI_AGENT_PLATFORM.md`](./02_AGENTIC_MULTI_AGENT_PLATFORM.md)
-
-> **Project 1 — Async Task Queue + Parallel Agent Workers + Event Audit** is here:
-> [`README_P1.md`](./README_P1.md) — RabbitMQ work distribution, manual-ACK worker
-> pool, retry/DLX, idempotency, DAG execution, Kafka lifecycle events,
-> Prometheus/Grafana, load tests with parallel speedup.
-
-## Architecture
+Agentic AI runtime: **Gateway/Router → Planner (DAG) → RAG-backed specialists
+→ Analysis → Verification → Human Approval (Telegram) → Purchase request**.
+Execution runs on the async engine: **RabbitMQ work distribution, worker pool,
+DAG dependencies, retry/DLX, manual ACK, idempotency, Postgres task state,
+Kafka audit events, Prometheus/Grafana** (see [`README_P1.md`](./README_P1.md)).
 
 ```
-                 ┌─────────────┐
- message ──────► │   Gateway   │  CLI entry, orchestration loop
-                 └──────┬──────┘
-                        ▼
-                 ┌─────────────┐
-                 │Router Agent │  classify intent → pick agents + strategy
-                 └──────┬──────┘
-                        ▼
-                 ┌───────────────┐
-                 │  Orchestrator │  fanout / pipeline / critic (LangGraph
-                 └──────┬────────┘  optional; pure-python fallback)
-          ┌─────────────┼─────────────┐
-          ▼             ▼             ▼
-      Research       Builder      Validator/Critic     ← agents (LLM-backed)
-          └─────────────┼─────────────┘
-                        ▼
-                 ┌─────────────┐
-                 │ToolExecutor │  web search / file sandbox / registry
-                 └──────┬──────┘
-                        ▼
-              TaskStore (SQLite) ──► Notifier (Telegram / mock) / Dashboard API
+Procurement Request (+ quote PDFs)
+        ↓
+   Hermes Planner ──→ DAG (async_engine.dag.TaskDAG)
+        ↓
+     RabbitMQ (critical path) ──→ Worker Pool (1/2/4/8, manual ACK, retry→DLQ)
+  ┌──────┼────────┬─────────┐
+  ↓      ↓        ↓         ↓
+Price  Vendor  Contract  Specification     ← RAG-backed (retrieve_evidence:
+  │      │        │         │                 quotes + vendors.json + spec)
+  └──────┴────────┴─────────┘
+                ↓
+        Analysis Agent (join: lowest approved + warranty/SLA)
+                ↓
+     Verification Agent (evidence-grounded: every claim cites a source)
+                ↓
+   Recommendation (PENDING_APPROVAL)
+                ↓
+   Human Approval ── Telegram ✅/❌ buttons (ApprovalStore) or API resolve
+                ↓
+        Purchase request        Kafka: task.created/started/completed/failed/retried
 ```
 
 - **Task lifecycle** with explicit status transitions (`validate_transition`) — every step is persisted as a `TaskEvent` in SQLite.
-- **Notifier abstraction** — Telegram bot when `TELEGRAM_BOT_TOKEN` is set, deterministic mock otherwise (tests stay token-free).
-- **Dashboard API** — read-only FastAPI over the task store.
+- **Multi-Agent RAG** (`src/hermes/rag/`) — per-case BM25-lite index over quotes + vendor registry + spec; specialists cite `RAG-EVIDENCE [source=…]`; optional embedding hook upgrades scoring to cosine.
+- **Parallel speedup** — `make procurement-bench` runs the case × {1,2,4} workers (measured 9.11s → 4.58s, **~2x**, with 1500ms simulated LLM latency per agent; 4 specialists fan out in parallel, analysis/verification join); engine-level 10/50/100/500-task load tests live in `README_P1.md`.
+- **Notifier abstraction** — Telegram bot with Approve/Reject inline buttons when `TELEGRAM_BOT_TOKEN` is set, deterministic mock otherwise (tests stay token-free). Standalone poller: `make approval-bot`.
+- **Dashboard API** — FastAPI over the task store.
 
 ## Project layout
 
 ```
 src/hermes/
-  gateway/     entrypoint + orchestration loop (--once / strategies)
+  gateway/     entrypoint + orchestration loop (--once, --quote PDFs)
   router/      intent classification, Project→channel→thread registry
-  orchestrator/ fanout · pipeline · critic strategies
-  agents/      research / builder / validator agents
-  tools/       tool registry + executor (web search, sandboxed file ops)
+  orchestrator/ procurement DAG bridge (legacy fanout/pipeline/critic mapped)
+  agents/      price / vendor / contract / spec / analysis / verification
+  rag/         BM25-lite case index + ingest (quotes/vendors/spec) + embed hook
+  procurement/ graph builder, store-aware handlers, DAG runner, benchmark
+  tools/       tool registry + executor (parse_quote_pdf, compare_prices,
+               check_approved_vendor, extract_contract_terms, score_spec,
+               retrieve_evidence, sandboxed file ops)
   tasks/       Pydantic schemas + SQLite TaskStore (lifecycle-safe)
-  messaging/   notifier abstraction (Telegram / mock)
+  messaging/   notifier abstraction (Telegram approve buttons / mock) + approval_bot
   llm/         Cloudflare Workers AI client
   dashboard.py read-only FastAPI inbox
   inbox_cli.py CLI inbox viewer
@@ -64,8 +65,8 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # or: make install
 cp .env.example .env
 make test
 
-python -m hermes.gateway --once --text "research python 3.12" --project demo --strategy fanout
-python -m hermes.gateway --once --text "build hello" --project demo --strategy pipeline
+HERMES_HITL_AUTO_APPROVE=true make demo-procurement   # 50 laptops → Lenovo (RAG + DAG + verify)
+make procurement-bench                                # parallel speedup 1/2/4 workers
 python -m hermes.inbox_cli --limit 10
 uvicorn hermes.dashboard:app --port 8001
 ```
@@ -76,10 +77,12 @@ uvicorn hermes.dashboard:app --port 8001
 |---|---|
 | `make install` | Tạo `.venv` + install `.[dev]` |
 | `make test` | Chạy pytest |
-| `make demo-fanout` / `demo-pipeline` / `demo-critic` | Demo từng strategy |
+| `make demo-procurement` | Demo case mua 50 laptop (DAG + RAG + verification + approval) |
+| `make procurement-bench` | Benchmark speedup 1/2/4 workers |
+| `make approval-bot` | Chạy Telegram poller duyệt Approve/Reject |
 | `make inbox` | Xem inbox qua CLI |
 | `make api` | Chạy Dashboard API (port 8001) |
-| `make verify` | test + toàn bộ demo |
+| `make verify` | test + demo + inbox |
 
 Optional extras: `pip install -e ".[langgraph]"` (LangGraph orchestrator), `pip install -e ".[telegram]"` (Telegram delivery).
 
@@ -93,7 +96,7 @@ CLOUDFLARE_API_TOKEN=<token>           # Workers AI Run permission
 CLOUDFLARE_MODEL=@cf/meta/llama-3.1-8b-instruct
 ```
 
-Without creds, the gateway runs in stub mode (deterministic, tests pass). With creds, all agents (research/builder/validator) call Workers AI via `POST /accounts/{id}/ai/run/{model}` — see [`src/hermes/llm/cloudflare.py`](src/hermes/llm/cloudflare.py).
+Without creds, the gateway runs in stub mode (deterministic, tests pass). With creds, all agents (price/vendor/contract/spec/analysis/verification) call Workers AI via `POST /accounts/{id}/ai/run/{model}` — see [`src/hermes/llm/cloudflare.py`](src/hermes/llm/cloudflare.py).
 
 ## Configuration
 
@@ -140,7 +143,10 @@ All via env / `.env` (see `.env.example`):
 |---|---|---|
 | `GET` | `/` | Service info |
 | `GET` | `/health` | Health check + mode (llm/notifier/projects) |
-| `POST` | `/run` | Chạy task full pipeline: `{text, project?, strategy? (fanout/pipeline/critic), user?}` — header `X-API-Token` |
+| `POST` | `/procurement/run` | Chạy case full DAG: `{text, project?, user?, quotes?[], quote_paths?[], required_spec?}` — header `X-API-Token` |
+| `POST` | `/run` | Alias legacy → procurement pipeline |
+| `GET` | `/procurement/approvals/pending` | Approval requests đang chờ manager |
+| `POST` | `/procurement/approvals/{id}/resolve` | `{approved, resolver?}` — duyệt/từ chối |
 | `GET` | `/tasks?limit=N` | Inbox (danh sách task) |
 | `GET` | `/tasks/{id}` | Chi tiết task + events (lifecycle audit) |
 

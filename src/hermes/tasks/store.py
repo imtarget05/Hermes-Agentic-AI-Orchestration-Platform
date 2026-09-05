@@ -42,7 +42,7 @@ class _Backend:
             import psycopg
             self._connect = lambda: psycopg.connect(dsn)
         else:
-            self._connect = lambda: sqlite3.connect(db_path)
+            self._connect = lambda: sqlite3.connect(db_path, timeout=30.0)
 
     def init(self) -> None:
         con = self._connect()

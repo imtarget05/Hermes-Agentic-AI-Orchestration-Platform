@@ -22,8 +22,10 @@ def build_procurement_graph(
     request: str,
     quotes: list[dict[str, Any]],
     required_spec: str = "",
+    rag_index: str = "",
 ) -> list[dict[str, Any]]:
-    payload = {"request": request, "quotes": quotes, "required_spec": required_spec}
+    payload = {"request": request, "quotes": quotes, "required_spec": required_spec,
+               "rag_index": rag_index}
     return [
         {"task_id": "price-1", "task_type": "price", "deps": [], "payload": dict(payload)},
         {"task_id": "vendor-1", "task_type": "vendor", "deps": [], "payload": dict(payload)},
@@ -57,16 +59,21 @@ def _payload_request(task: Any) -> str:
     return getattr(task, "task_id", "")
 
 
-def _iter_json_objects(ctx: str) -> list[dict]:
-    """Extract every balanced {...} substring that parses as a JSON object."""
+def _iter_json_objects(ctx: str, max_window: int = 6000) -> list[dict]:
+    """Extract every balanced {...} substring that parses as a JSON object.
+
+    The scan window is bounded so a truncated JSON blob embedded in agent
+    prose cannot swallow the rest of the context.
+    """
     out: list[dict] = []
     i = 0
-    while i < len(ctx):
+    n = len(ctx)
+    while i < n:
         start = ctx.find("{", i)
         if start == -1:
             break
         depth, end = 0, -1
-        for j in range(start, len(ctx)):
+        for j in range(start, min(n, start + max_window)):
             if ctx[j] == "{":
                 depth += 1
             elif ctx[j] == "}":
@@ -74,8 +81,9 @@ def _iter_json_objects(ctx: str) -> list[dict]:
                 if depth == 0:
                     end = j + 1
                     break
-        if end == -1:
-            break
+        if end == -1:  # unbalanced/truncated blob — skip its opening brace
+            i = start + 1
+            continue
         try:
             data = json.loads(ctx[start:end])
             if isinstance(data, dict):
@@ -105,6 +113,29 @@ def _terms_from_ctx(ctx: str) -> dict[str, dict]:
         if o.get("vendor") and "warranty_years" in o:
             out[str(o["vendor"])] = o
     return out
+
+
+def _rag_index_path(task: Any) -> str:
+    import os as _os
+    payload = getattr(task, "payload", None) or {}
+    if isinstance(payload, dict) and payload.get("rag_index"):
+        return str(payload["rag_index"])
+    return _os.environ.get("HERMES_RAG_INDEX", "")
+
+
+def _rag_lines(task: Any, query: str, top_k: int = 2) -> list[str]:
+    """RAG evidence lines with source citations (no JSON braces → parser-safe)."""
+    path = _rag_index_path(task)
+    if not path:
+        return []
+    try:
+        from ..rag import RagIndex, format_hits
+        hits = RagIndex.load(path).query(query, top_k=top_k)
+        if not hits:
+            return []
+        return ["RAG-EVIDENCE:"] + [f"  - {line}" for line in format_hits(hits).splitlines()]
+    except Exception:
+        return []
 
 
 def _sibling_results(store: Any, task: Any, task_ids: list[str]) -> dict[str, str]:
@@ -144,8 +175,10 @@ def build_procurement_handlers(store: Any = None) -> dict[str, Callable[[Any], s
         ex = ToolExecutor({"general", "procurement_price"})
         ranking = ex.call("compare_prices", quotes_json=json.dumps(quotes))
         lines = [json.dumps(q) for q in quotes] + [ranking]
-        lines.append(_agent_prose("price", _payload_request(task),
-                                 f"quotes: {json.dumps(quotes)[:1500]}"))
+        # NB: prose context must NOT embed raw quotes JSON (truncation would
+        # corrupt the machine-readable lines above for downstream parsers).
+        lines.append(_agent_prose("price", _payload_request(task), ranking[:800]))
+        lines.extend(_rag_lines(task, "unit price total quantity laptop quote"))
         return "\n".join(lines)
 
     def _vendor(task: Any) -> str:
@@ -159,6 +192,7 @@ def build_procurement_handlers(store: Any = None) -> dict[str, Callable[[Any], s
             except Exception as e:
                 lines.append(json.dumps({"vendor": v, "approved": False, "note": str(e)[:200]}))
         lines.append(_agent_prose("vendor", _payload_request(task), f"vendors: {vendors}"))
+        lines.extend(_rag_lines(task, f"approved vendor {' '.join(vendors)}"))
         return "\n".join(lines)
 
     def _contract(task: Any) -> str:
@@ -180,6 +214,7 @@ def build_procurement_handlers(store: Any = None) -> dict[str, Callable[[Any], s
             return _agent_prose("contract", _payload_request(task), "")
         lines.append(_agent_prose("contract", _payload_request(task),
                                  f"{len(quotes)} quotes analyzed"))
+        lines.extend(_rag_lines(task, "payment warranty years SLA hours terms"))
         return "\n".join(lines)
 
     def _spec(task: Any) -> str:
@@ -198,6 +233,7 @@ def build_procurement_handlers(store: Any = None) -> dict[str, Callable[[Any], s
         if not lines:
             return _agent_prose("spec", _payload_request(task), "")
         lines.append(_agent_prose("spec", _payload_request(task), f"spec: {spec[:300]}"))
+        lines.extend(_rag_lines(task, spec or "laptop specification CPU RAM SSD"))
         return "\n".join(lines)
 
     def _analysis(task: Any) -> str:
@@ -224,7 +260,18 @@ def build_procurement_handlers(store: Any = None) -> dict[str, Callable[[Any], s
         rec = sibs.get("analysis-1", "")
         if not rec:
             rec = _analysis(task)  # self-sufficient fallback
-        return AGENTS["verification"].run(_payload_request(task), rec)
+        out = AGENTS["verification"].run(_payload_request(task), rec)
+        # RAG corroboration: cite the registry/quote backing the verdict.
+        try:
+            from .schemas import Recommendation
+            vendor = Recommendation.from_text(rec).vendor
+            if vendor:
+                extra = _rag_lines(task, f"{vendor} approved vendor quote", top_k=1)
+                if extra:
+                    out += "\n" + "\n".join(extra)
+        except Exception:
+            pass
+        return out
 
     return {
         "price": _price,

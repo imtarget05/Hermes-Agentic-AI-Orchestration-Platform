@@ -27,7 +27,8 @@ API đang chạy tại chính Space này:
 | Endpoint | Mô tả |
 |---|---|
 | `GET /health` | Health check |
-| `POST /run` | Chạy task (fanout / pipeline / critic) — header `X-API-Token` |
+| `POST /procurement/run` | Chạy case (DAG + RAG + verification) — header `X-API-Token` |
+| `POST /procurement/approvals/{id}/resolve` | Duyệt / từ chối (manager) |
 | `GET /tasks` | Inbox |
 | `GET /tasks/{id}` | Chi tiết task + lifecycle events |
 | `GET /docs` | Swagger UI |

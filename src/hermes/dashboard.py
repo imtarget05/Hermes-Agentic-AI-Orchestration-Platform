@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
+
 from .config import settings
 from .tasks import TaskStore
 

@@ -1,4 +1,4 @@
-from hermes.router import RoutingRegistry, RouterAgent
+from hermes.router import RouterAgent, RoutingRegistry
 
 
 def test_registry_resolve(tmp_path):

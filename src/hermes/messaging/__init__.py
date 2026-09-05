@@ -29,6 +29,7 @@ class TelegramNotifier(BaseNotifier):
 
     def send(self, project: str, text: str) -> None:
         import asyncio
+
         from telegram import Bot
         channel = project
         thread_id = 0

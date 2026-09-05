@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    name: Lint + Unit tests (no broker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,mq,metrics]"
+
+      - name: Ruff lint
+        run: ruff check src tests
+
+      - name: Run test suite (in-memory bus, RabbitMQ tests skip)
+        env:
+          HERMES_ASYNC_MODE: memory
+        run: PYTHONPATH=src python -m pytest tests -q
+
+  integration-rabbitmq:
+    name: Integration tests (real RabbitMQ)
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:3-management
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,mq,metrics]"
+
+      - name: Integration tests against real RabbitMQ (manual ACK, retry queue, DLX)
+        env:
+          HERMES_RABBITMQ_URL: amqp://guest:guest@localhost:5672/%2F
+        run: PYTHONPATH=src python -m pytest tests/test_async_integration.py -v
+
+  build:
+    name: Docker + Compose validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker compose config
+        run: docker compose config --quiet
+
+      - name: Build Hermes image (API + workers)
+        run: docker build -t hermes:ci .

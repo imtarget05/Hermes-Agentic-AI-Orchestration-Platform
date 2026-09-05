@@ -1,6 +1,6 @@
-from hermes.tasks import Task, TaskStore, TaskStatus
-from hermes.orchestrator import orchestrate, run_fanout, run_pipeline, run_critic
 from hermes.messaging import MockNotifier
+from hermes.orchestrator import orchestrate, run_critic, run_fanout, run_pipeline
+from hermes.tasks import Task, TaskStatus, TaskStore
 
 
 def test_patterns_no_key():

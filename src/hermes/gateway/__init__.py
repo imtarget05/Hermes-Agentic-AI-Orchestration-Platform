@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import click
-from ..config import settings
+
 from ..agents import configure_agents_llm
+from ..config import settings
 from ..llm import build_llm, build_router_classifier
-from ..router import RoutingRegistry, RouterAgent
-from ..tasks import Task, TaskStore
+from ..messaging import SafeNotifier, build_notifier
 from ..orchestrator import orchestrate
-from ..messaging import build_notifier, SafeNotifier
+from ..router import RouterAgent, RoutingRegistry
+from ..tasks import Task, TaskStore
 
 
 @click.command()

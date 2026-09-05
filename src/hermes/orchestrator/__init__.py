@@ -10,12 +10,13 @@ so local tests never break. Task state persisted in TaskStore.
 from __future__ import annotations
 
 from typing import TypedDict
+
 from ..agents import AGENTS
-from ..tasks.store import TaskStore
 from ..tasks.schemas import TaskStatus
+from ..tasks.store import TaskStore
 
 try:
-    from langgraph.graph import StateGraph, END
+    from langgraph.graph import END, StateGraph
     _HAS_LG = True
 except Exception:
     _HAS_LG = False

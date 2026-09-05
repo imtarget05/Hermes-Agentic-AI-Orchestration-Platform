@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .config import settings
 from .runtime import HermesRuntime
 
 app = FastAPI(title="Hermes Platform API")

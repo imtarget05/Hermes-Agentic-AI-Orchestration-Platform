@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
+
 from pydantic import BaseModel, Field
 
 
@@ -46,8 +47,8 @@ class Task(BaseModel):
     retries: int = 0
     max_retries: int = 3
     result: str = ""
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class TaskEvent(BaseModel):
@@ -56,4 +57,4 @@ class TaskEvent(BaseModel):
     to: str
     actor: str
     note: str = ""
-    at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())

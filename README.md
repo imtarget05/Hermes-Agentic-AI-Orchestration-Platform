@@ -4,6 +4,11 @@ Agentic AI runtime: **Gateway/Router → Orchestrator → specialized agents →
 
 Spec: [`02_AGENTIC_MULTI_AGENT_PLATFORM.md`](./02_AGENTIC_MULTI_AGENT_PLATFORM.md)
 
+> **Project 1 — Async Task Queue + Parallel Agent Workers + Event Audit** is here:
+> [`README_P1.md`](./README_P1.md) — RabbitMQ work distribution, manual-ACK worker
+> pool, retry/DLX, idempotency, DAG execution, Kafka lifecycle events,
+> Prometheus/Grafana, load tests with parallel speedup.
+
 ## Architecture
 
 ```

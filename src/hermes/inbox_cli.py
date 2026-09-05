@@ -1,5 +1,6 @@
 """CLI inbox viewer."""
 import click
+
 from .config import settings
 from .tasks import TaskStore
 

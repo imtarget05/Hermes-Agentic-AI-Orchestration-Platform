@@ -8,8 +8,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
 from .schemas import Task, TaskEvent, TaskStatus, validate_transition
 
 _DDL_TASKS = """
@@ -108,7 +109,7 @@ class TaskStore:
         validate_transition(task.status, to)
         frm = task.status
         task.status = to
-        task.updated_at = datetime.now(timezone.utc).isoformat()
+        task.updated_at = datetime.now(UTC).isoformat()
         if to == TaskStatus.RETRY:
             task.retries += 1
         self._exec(
@@ -123,7 +124,7 @@ class TaskStore:
         task.result = result
         if owner:
             task.owner_agent = owner
-        task.updated_at = datetime.now(timezone.utc).isoformat()
+        task.updated_at = datetime.now(UTC).isoformat()
         self._exec(
             "UPDATE tasks SET result=?, owner_agent=?, updated_at=? WHERE id=?",
             (task.result, task.owner_agent, task.updated_at, task.id),

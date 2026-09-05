@@ -1,5 +1,6 @@
 import pytest
-from hermes.tools import ToolExecutor, FatalToolError
+
+from hermes.tools import FatalToolError, ToolExecutor
 
 
 def test_permission_denied():

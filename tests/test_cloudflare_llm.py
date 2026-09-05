@@ -1,6 +1,6 @@
+from hermes.agents import AGENTS, configure_agents_llm
 from hermes.llm import build_llm
 from hermes.llm.cloudflare import CloudflareLLM
-from hermes.agents import AGENTS, configure_agents_llm
 
 
 def test_build_llm_stub_without_creds():
@@ -48,7 +48,10 @@ def test_cloudflare_error_surfaces(monkeypatch):
 def test_configure_agents_llm():
     configure_agents_llm(None)
     assert all(a.llm is None for a in AGENTS.values())
-    fn = lambda p: "x"  # noqa
+
+    def fn(p):
+        return "x"
+
     configure_agents_llm(fn)
     assert all(a.llm is fn for a in AGENTS.values())
     configure_agents_llm(None)  # reset to stub for other tests

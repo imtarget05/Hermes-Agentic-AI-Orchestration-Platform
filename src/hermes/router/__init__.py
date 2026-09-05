@@ -1,4 +1,4 @@
-from .registry import RoutingRegistry, Route
 from .agent import RouterAgent
+from .registry import Route, RoutingRegistry
 
-__all__ = ["RoutingRegistry", "Route", "RouterAgent"]
+__all__ = ["Route", "RouterAgent", "RoutingRegistry"]

@@ -4,7 +4,8 @@ Rule-based is default (no API key needed). RouterAgent upgrades to
 LLM classification when a `classify` callable is injected.
 """
 from __future__ import annotations
-from .registry import RoutingRegistry, Route
+
+from .registry import Route, RoutingRegistry
 
 
 class RouterAgent:

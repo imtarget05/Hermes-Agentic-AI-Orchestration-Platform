@@ -1,7 +1,7 @@
 """LLM factory. Default provider: cloudflare (Workers AI)."""
 from __future__ import annotations
 
-from .cloudflare import CloudflareLLM, CloudflareError
+from .cloudflare import CloudflareError, CloudflareLLM
 
 
 def build_llm(provider: str = "cloudflare", model: str = "",
@@ -48,4 +48,4 @@ def build_router_classifier(llm, projects: list[str]):
     return classify
 
 
-__all__ = ["CloudflareLLM", "CloudflareError", "build_llm", "build_router_classifier"]
+__all__ = ["CloudflareError", "CloudflareLLM", "build_llm", "build_router_classifier"]

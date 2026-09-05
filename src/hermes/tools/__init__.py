@@ -12,9 +12,9 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
 
 DENY_PATTERN = re.compile(r"(rm\s+-rf\s+/( |$)|:\(\)\s*\{|:;\s*\}|\bshutdown\b|\breboot\b)", re.IGNORECASE)
 

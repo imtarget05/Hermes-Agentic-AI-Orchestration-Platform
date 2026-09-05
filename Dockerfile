@@ -6,13 +6,15 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 COPY routing.json ./
 
-RUN pip install --no-cache-dir -e .
+# async extras: pika (RabbitMQ) + prometheus-client; confluent-kafka optional at runtime
+RUN pip install --no-cache-dir -e ".[dev,mq,metrics]"
 
 RUN mkdir -p sandbox
 
 ENV HERMES_DB_PATH=/app/hermes_tasks.db \
     HERMES_ROUTING_PATH=/app/routing.json \
     HERMES_SANDBOX_DIR=/app/sandbox \
+    HERMES_ASYNC_MODE=rabbitmq \
     LLM_PROVIDER=cloudflare \
     PYTHONUNBUFFERED=1
 

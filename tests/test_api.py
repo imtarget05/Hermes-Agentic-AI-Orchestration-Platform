@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-import hermes.api as api
+from hermes import api
 from hermes.config import settings
 
 

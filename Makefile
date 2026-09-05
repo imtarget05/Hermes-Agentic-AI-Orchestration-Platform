@@ -20,3 +20,22 @@ api:
 	PYTHONPATH=src .venv/bin/uvicorn hermes.dashboard:app --port 8001
 
 verify: test demo-fanout demo-pipeline demo-critic inbox
+
+# ---- Hermes Project 1 — async task queue engine ----
+async-test:
+	PYTHONPATH=src .venv/bin/python -m pytest tests/test_async_contract.py tests/test_async_retry.py tests/test_async_dag.py tests/test_async_events.py tests/test_async_store.py tests/test_async_worker.py tests/test_async_orchestrator.py tests/test_async_api.py -q
+
+async-ready:
+	PYTHONPATH=src .venv/bin/python -m hermes.async_engine.cli ready
+
+async-loadtest:
+	PYTHONPATH=src .venv/bin/python -m hermes.async_engine.cli loadtest
+
+compose-up:
+	docker compose up -d
+
+compose-down:
+	docker compose down
+
+async-api:
+	PYTHONPATH=src HERMES_ASYNC_MODE=memory .venv/bin/uvicorn hermes.async_api:app --port 8000

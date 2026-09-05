@@ -7,7 +7,8 @@ falls back to deterministic stub so tests run without API key.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from ..tools import ToolExecutor, REGISTRY
+
+from ..tools import ToolExecutor
 
 
 @dataclass

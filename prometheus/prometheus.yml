@@ -1,0 +1,13 @@
+# Prometheus scrape config for Hermes — Project 1
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "hermes"
+    static_configs:
+      - targets:
+          - "api:8000"          # hermes /metrics (async_api exposes it)
+          - "worker:8001"       # hermes worker /metrics
+      # local (no docker hostnames) targets for `make load-metrics` on the mac
+      # - targets: ["host.docker.internal:8000"]

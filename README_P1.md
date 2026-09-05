@@ -1,50 +1,105 @@
-# Hermes — Project 1 · Async Task Queue + Parallel Agent Workers + Event Audit
+# Hermes — Project 1 · Agentic AI Orchestration Platform
 
-> Orchestration engine built so the **orchestrator never executes worker logic**.
-> It validates requests, creates tasks, builds a DAG, publishes to **RabbitMQ**,
-> tracks state, and lets a **parallel worker pool** do the work — with **manual ACK**,
-> **retry + backoff**, a **dead-letter queue**, **idempotency**, **Kafka** lifecycle
-> events, and **Prometheus/Grafana** observability.
+> Hermes is an **agentic orchestration engine** — not just a distributed task
+> queue. The queue is only one loop. The real architecture is **8 loops** that
+> turn a user request into verified, evaluated, continuously-improving work.
+
+```
+ USER REQUEST
+      │
+      ▼
+┌──────────────────────────────┐
+│ 1. CONTEXT LOOP              │   retrieve state · prior evidence · failure patterns
+│    loops/context.py          │   → build ExecutionContext
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│ 2. PLANNING / REASONING LOOP │   task decomposition · DAG generation
+│    loops/planner.py          │   (LLM-hookable, policy-aware)
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│ 3. TASK DISPATCH LOOP        │   priority · routing · queue assignment
+│    orchestrator.py +         │   ┌─────────────┐
+│    loops/advance (advancer)  │──▶│   RabbitMQ  │  ← implementation of THIS loop only
+└──────────────┬───────────────┘   └──────┬──────┘
+               │                         │
+               │            ┌────────────┼────────────┐
+               │            ▼            ▼            ▼
+               │         Worker       Worker       Worker
+               │            │            │            │
+               │            └────────────┼────────────┘
+               ▼                         ▼
+┌──────────────────────────────┐
+│ 4. TOOL / AGENT EXECUTION    │   LLM · API · DB · shell
+│    worker.py (handler)       │
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│ 5. VERIFICATION LOOP         │   schema · evidence · quality check
+│    loops/verify.py           │   PASS → aggregate │ FAIL → retry/fallback
+└──────────────┬───────────────┘
+               │
+          ┌────┴─────┐
+          ▼          ▼
+        PASS       FAIL
+          │          │
+          ▼          ▼
+      Aggregate    Retry ──▶ (exhausted) ──▶ fallback / escalate
+          │
+          ▼
+┌──────────────────────────────┐
+│ 6. RELIABILITY LOOP          │   retry · timeout · circuit breaker
+│    loops/reliability.py      │   · DLQ · escalation
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│ 7. EVALUATION LOOP           │   latency · success · quality
+│    loops/evaluate.py         │   · worker efficiency · speedup
+└──────────────┬───────────────┘
+               ▼
+┌──────────────────────────────┐
+│ 8. LEARNING / AUDIT LOOP     │   Kafka events · failure patterns
+│    loops/audit.py            │   · routing/planning feedback ──▶ loop 1 & 2
+└──────────────────────────────┘
+```
+
+**RabbitMQ is not the architecture** — it is the *implementation of loop 3* (Task
+Dispatch). The 8-loop flow is transport-agnostic: swap RabbitMQ for any
+`MessageBus` and the agentic behavior (plan → verify → recover → evaluate →
+learn) is unchanged. `run_agent_workflow()` in `loops/pipeline.py` runs all 8
+loops end-to-end.
 
 This is the "Project 1" layer of the repo, layered on top of the Project 2
 multi-agent runtime. It lives in `src/hermes/async_engine/`.
 
----
-
-## 1. Why the async architecture
-
-The old flow was synchronous: `Task 1 → Agent A → Agent B → Agent C`, and
-Task 2/3 waited. A slow/down agent blocks the orchestrator's request.
-
-The new flow is:
-
-```
- Task ─> Orchestrator ─> RabbitMQ ─┼─ Worker A ─┐
-                                   ┼─ Worker B ─┼─> Result Aggregator ─> Evidence Store
-                                   └─ Worker C ─┘
-```
-
-The orchestrator only **dispatches**. Workers are separate processes pulling
-from the queue. If one worker dies, an un-ACKed message is requeued and another
-worker takes over.
-
----
-
-## 2. Package layout
+The **loops/** package is the agentic core (loops 1,2,5,6,7,8). The files
+outside loops/ are the dispatch/execute substrate (loops 3,4) that the loops run
+on top of.
 
 ```
 src/hermes/async_engine/
   contract.py      canonical Task contract, statuses, routing (agent.<type> → q.agent.<type>)
   dag.py           DAG build + dependency resolution (parallel branches, join)
   retry.py         retryable vs non-retryable classification + backoff (1s/5s/30s)
-  store.py         Postgres/SQLite store: workflows, tasks, task_results, execution_state
+  store.py         Postgres/SQLite store: workflows, tasks, task_results, execution_state,
+                   + task_dependencies (DAG edges for cross-process dispatch)
   backends.py      MessageBus: RabbitMQBus (pika) + InMemoryBus (tests / no-broker)
   eventbus.py      KafkaEventBus + JsonlEventBus + InMemoryEventBus (off-critical-path)
-  worker.py        Worker lifecycle (RECEIVE→VALIDATE→STARTED→EXECUTE→…), WorkerPool
+  worker.py        Worker lifecycle (RECEIVE→VALIDATE→STARTED→EXECUTE→VERIFY→…), WorkerPool
   orchestrator.py  AsyncOrchestrator: validate → create → build DAG → dispatch → aggregate
   metrics.py       Prometheus metrics (+ Noop fallback)
   loadtest.py      N × workers load test → throughput / p95 / speedup
-  cli.py           `ready` · `work` (long-running worker) · `loadtest`
+  cli.py           `ready` · `work` (long-running worker) · `orchestrator` · `loadtest`
+  loops/
+    __init__.py    re-exports all loops
+    context.py     Loop 1 — retrieve state/evidence/failure patterns → ExecutionContext
+    planner.py     Loop 2 — LLM-hookable decomposition + DAG gen + dependency resolution
+    verify.py      Loop 5 — schema/evidence/quality check (PASS/FAIL → retry or DLQ)
+    reliability.py Loop 6 — timeout · circuit breaker · escalation
+    evaluate.py    Loop 7 — latency/success/quality/worker efficiency
+    audit.py       Loop 8 — failure-pattern mining → policy feedback into loop 2
+    pipeline.py    run_agent_workflow() — all 8 loops end-to-end
 ---
 
 ## 4. Worker lifecycle with manual ACK (§5)
@@ -196,6 +251,15 @@ prometheus-client) for the real broker path.
 
 | Requirement                      | Where                                       | Done |
 |----------------------------------|---------------------------------------------|:----:|
+| 8-loop agentic architecture      | `loops/` (context/plan/verify/relia/eval/audit) + `pipeline` | ✅   |
+| Context loop (state + evidence)  | `loops/context.py` ContextBuilder           | ✅   |
+| Planning loop (LLM-hookable DAG) | `loops/planner.py` Planner                  | ✅   |
+| Dispatch loop                    | `orchestrator.py` + `loops` advancer        | ✅   |
+| Execute loop (workers)           | `worker.py` WorkerPool                      | ✅   |
+| Verification loop                | `loops/verify.py` Verifier (wired in worker)| ✅   |
+| Reliability loop (timeout/breaker)| `loops/reliability.py`                     | ✅   |
+| Evaluation loop                  | `loops/evaluate.py` workflow_report         | ✅   |
+| Learning/Audit loop              | `loops/audit.py` failure-pattern → policy   | ✅   |
 | Orchestrator doesn't execute     | `orchestrator.py` dispatch-only             | ✅   |
 | RabbitMQ used                    | `backends.RabbitMQBus` + compose            | ✅   |
 | Parallel worker pool             | `worker.WorkerPool`                         | ✅   |

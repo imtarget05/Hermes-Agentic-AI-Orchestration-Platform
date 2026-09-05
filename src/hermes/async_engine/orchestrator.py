@@ -120,6 +120,9 @@ class AsyncOrchestrator:
         handlers: dict[str, Callable[[Task], str]],
         workers: int = 1,
         timeout: float = 60.0,
+        verifier=None,
+        breaker=None,
+        task_timeout_seconds: float = 30.0,
     ) -> dict[str, Any]:
         """Full parallel DAG run on one bus (InMemory by default). Blocks until
         every task is terminal. Returns the aggregate report."""
@@ -163,7 +166,9 @@ class AsyncOrchestrator:
 
         def build(name: str) -> Worker:
             w = Worker(name, list(handlers.keys()), handler,
-                       self.store, self.bus, events=self.events, metrics=self.metrics)
+                       self.store, self.bus, events=self.events, metrics=self.metrics,
+                       verifier=verifier, breaker=breaker,
+                       timeout_seconds=task_timeout_seconds)
             w.on_task_completed = on_done
             w.on_task_failed = on_fail
             return w

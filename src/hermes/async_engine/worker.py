@@ -22,7 +22,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .contract import (
     DEAD_LETTER_QUEUE,
@@ -33,6 +33,7 @@ from .contract import (
     Task,
     routing_for,
 )
+from .loops.verify import VerificationError
 from .metrics import (
     TASK_DURATION,
     TASKS_COMPLETED,
@@ -45,6 +46,10 @@ from .metrics import (
     build_metrics,
 )
 from .retry import RetryPolicy, classify_failure
+
+if TYPE_CHECKING:
+    from .loops.reliability import CircuitBreaker
+    from .loops.verify import Verifier
 
 Handler = Callable[[Task], str]  # returns a result URI (e.g. s3://..., in-memory marker)
 
@@ -62,7 +67,16 @@ class Worker:
         retry_policy: RetryPolicy | None = None,
         poll_interval: float = 0.005,
         verify_idempotency: bool = True,
+        # ---- loop 5 (verification) + loop 6 (reliability) hooks ----
+        verifier: Verifier | None = None,
+        breaker: CircuitBreaker | None = None,
+        timeout_seconds: float = 30.0,
     ):
+        from .loops.reliability import CircuitBreaker
+        from .loops.verify import (
+            Verifier,  # lazy: loops depend on engine, not vice versa
+        )
+
         self.name = name
         self.task_types = [task_types] if isinstance(task_types, str) else list(task_types)
         self.handler = handler
@@ -73,6 +87,9 @@ class Worker:
         self.policy = retry_policy or RetryPolicy()
         self.poll_interval = poll_interval
         self.verify_idempotency = verify_idempotency
+        self.verifier = verifier if verifier is not None else Verifier()
+        self.breaker = breaker if breaker is not None else CircuitBreaker()
+        self.timeout_seconds = timeout_seconds
         self.busy = False
         self.processed = 0
         self.failed = 0
@@ -116,6 +133,12 @@ class Worker:
             delivery.ack()  # already done — just acknowledge the duplicate
             return
 
+        # --- RELIABILITY: circuit breaker (loop 6) ---
+        if not self.breaker.allow(task.task_type):
+            delivery.ack()
+            self.bus.requeue(queue, raw, delay_seconds=self.policy.backoff_seconds(1))
+            return
+
         # --- MARK STARTED (atomic claim) ---
         if not self.store.mark_started(task.task_id, self.name):
             delivery.ack()  # another worker owns it, or it's completed
@@ -138,14 +161,23 @@ class Worker:
         self.events.emit(EVENT_STARTED, task_id=task.task_id,
                          workflow_id=task.workflow_id, worker_id=self.name, attempt=task.attempt)
         start = time.time()
-        result_uri = self.handler(task)
+        # loop 6: hard deadline around handler execution
+        from .loops.reliability import run_with_timeout
+
+        result_uri = run_with_timeout(lambda: self.handler(task),
+                                      self.timeout_seconds, task.task_type)
         elapsed = time.time() - start
+        # loop 5: verification before the result is accepted
+        verdict = self.verifier.verify(task, result_uri)
+        if not verdict.passed:
+            raise VerificationError(verdict.reason, retryable=verdict.retryable)
         self._pending_result_uri = result_uri
         return elapsed
 
     def _complete(self, task: Task, delivery, duration: float) -> None:
         result_uri = getattr(self, "_pending_result_uri", "") or ""
         self.store.mark_completed(task.task_id, result_uri=result_uri, worker_id=self.name)
+        self.breaker.record_success(task.task_type)  # loop 6
         self.metrics.inc(TASKS_COMPLETED, 1.0)
         self.metrics.observe(TASK_DURATION, duration)
         self.events.emit(EVENT_COMPLETED, task_id=task.task_id,
@@ -158,7 +190,8 @@ class Worker:
 
     def _on_failure(self, task: Task, delivery, queue: str, error: Exception) -> None:
         self.failed += 1
-        retryable = classify_failure(error)
+        self.breaker.record_failure(task.task_type)  # loop 6
+        retryable = classify_failure(error) or getattr(error, "retryable", False)
         should_retry = retryable and self.policy.should_retry(task.attempt, task.max_attempts)
 
         if should_retry:
@@ -184,8 +217,19 @@ class Worker:
 
     def _deadletter_and_ack(self, delivery, raw: dict[str, Any], reason: str) -> None:
         task_id = raw.get("task_id", "?")
+        raw["metadata"] = {**(raw.get("metadata") or {}), "dead_letter_reason": reason}
+        # loop 6: escalate terminal failures after retries are exhausted
+        if int(raw.get("attempt", 1)) >= int(raw.get("max_attempts", 1)):
+            try:
+                from .loops.reliability import escalation_metadata
+                probe = Task.from_message(raw)
+                raw["metadata"].update(escalation_metadata(probe, reason))
+                self.events.emit("task.escalated", task_id=task_id,
+                                 workflow_id=raw.get("workflow_id", ""),
+                                 worker_id=self.name, reason=reason[:200])
+            except Exception:
+                pass  # best-effort escalation metadata
         try:
-            raw["metadata"] = {**(raw.get("metadata") or {}), "dead_letter_reason": reason}
             if hasattr(self.bus, "publish_deadletter"):
                 self.bus.publish_deadletter(raw)
             else:

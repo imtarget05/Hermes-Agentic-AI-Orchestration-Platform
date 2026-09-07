@@ -14,3 +14,8 @@ mock_notifier.log
 *.log
 .hermes/
 .DS_Store
+# Local tooling/dev plans & per-developer IDE configs (never commit)
+.kilo/
+.vscode/
+# Runtime database sidecar artifacts
+*.db.rag.json

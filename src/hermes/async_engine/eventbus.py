@@ -123,3 +123,18 @@ class KafkaEventBus:
                 self._producer.flush(timeout)
             except Exception:
                 pass
+
+
+def emit_best_effort(bus: EventBus, event_type: str, **fields: Any) -> dict[str, Any] | None:
+    """Emit an observability event without breaking the execution path.
+
+    HERMES-10/R16: the audit/trace bus (Kafka, JSONL, ...) is NOT a critical
+    dependency. A raised emit must never fail a task, so every call site routes
+    through here and swallows transient/structural bus failures. This is the
+    single chokepoint that guarantees the invariant holds for every bus —
+    matching what KafkaEventBus.emit already does internally.
+    """
+    try:
+        return bus.emit(event_type, **fields)
+    except Exception:  # bus is observability only — never propagate
+        return None

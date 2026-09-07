@@ -9,6 +9,7 @@ a tool, and what happens on failure?
 """
 from __future__ import annotations
 
+import hashlib
 import json as _json
 import os as _os
 import re
@@ -16,9 +17,14 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 DENY_PATTERN = re.compile(r"(rm\s+-rf\s+/( |$)|:\(\)\s*\{|:;\s*\}|\bshutdown\b|\breboot\b)", re.IGNORECASE)
+
+
+def _today_iso() -> str:
+    return date.today().isoformat()
 
 
 class RetryableToolError(Exception):
@@ -102,6 +108,103 @@ def _approved_vendors_path() -> str:
     return _os.environ.get("HERMES_VENDORS_PATH", "./vendors.json")
 
 
+def _extract_valid_until(text: str) -> str | None:
+    """Extract valid_until date from quote text. Looks for 'valid until', 'expires', 'valid through' patterns."""
+    low = text.lower()
+    # Pattern: valid until YYYY-MM-DD or DD/MM/YYYY or similar
+    patterns = [
+        r"valid\s+until\s*:?\s*(\d{4}-\d{2}-\d{2})",
+        r"valid\s+until\s*:?\s*(\d{2}[-/]\d{2}[-/]\d{4})",
+        r"expires\s*:?\s*(\d{4}-\d{2}-\d{2})",
+        r"expires\s*:?\s*(\d{2}[-/]\d{2}[-/]\d{4})",
+        r"valid\s+through\s*:?\s*(\d{4}-\d{2}-\d{2})",
+        r"valid\s+through\s*:?\s*(\d{2}[-/]\d{2}[-/]\d{4})",
+        r"expiry\s+date\s*:?\s*(\d{4}-\d{2}-\d{2})",
+        r"expiry\s+date\s*:?\s*(\d{2}[-/]\d{2}[-/]\d{4})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, low)
+        if m:
+            d = m.group(1)
+            # Normalize to YYYY-MM-DD
+            if re.match(r"\d{2}[-/]\d{2}[-/]\d{4}", d):
+                parts = re.split(r"[-/]", d)
+                return f"{parts[2]}-{parts[1].zfill(2)}-{parts[0].zfill(2)}"
+            return d
+    return None
+
+
+def _extract_legal_entity(text: str) -> str | None:
+    """Extract legal entity (company name) from quote text."""
+    low = text.lower()
+    # Common patterns for legal entity
+    patterns = [
+        r"legal\s+entity\s*:?\s*([^\n]+)",
+        r"company\s+name\s*:?\s*([^\n]+)",
+        r"issued\s+by\s*:?\s*([^\n]+)",
+        r"seller\s*:?\s*([^\n]+)",
+        r"vendor\s*:?\s*([^\n]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, low)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _extract_tax_included(text: str) -> bool | None:
+    """Extract whether tax is included."""
+    low = text.lower()
+    if re.search(r"tax\s+included|vat\s+included|including\s+tax|incl\.?\s+tax", low):
+        return True
+    if re.search(r"tax\s+excluded|vat\s+excluded|excluding\s+tax|excl\.?\s+tax|plus\s+tax|tax\s+extra", low):
+        return False
+    return None
+
+
+def _extract_currency(text: str) -> str | None:
+    """Extract currency from quote text."""
+    # ISO 4217 codes
+    currencies = ["USD", "EUR", "GBP", "VND", "JPY", "CNY", "SGD", "AUD", "CAD", "CHF"]
+    for curr in currencies:
+        if re.search(rf"\b{curr}\b", text, re.IGNORECASE):
+            return curr
+    # Symbols
+    if "$" in text and "USD" not in text.upper():
+        return "USD"
+    if "€" in text:
+        return "EUR"
+    if "£" in text:
+        return "GBP"
+    if "₫" in text or "VND" in text.upper():
+        return "VND"
+    return None
+
+
+def _extract_incoterms(text: str) -> str | None:
+    """Extract Incoterms from quote text."""
+    low = text.lower()
+    incoterms_list = [
+        "exw", "fca", "fas", "fob", "cfr", "cif", "cpt", "cip",
+        "dap", "dpu", "ddp"
+    ]
+    for term in incoterms_list:
+        if re.search(rf"\b{term}\b", low):
+            return term.upper()
+    return None
+
+
+def _compute_source_hash(path: str) -> str | None:
+    """Compute SHA256 hash of a file for source integrity."""
+    try:
+        p = Path(path)
+        if not p.exists():
+            return None
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except Exception:
+        return None
+
+
 def _parse_quote_text(text: str, source_uri: str = "") -> dict:
     t = text or ""
     low = t.lower()
@@ -123,8 +226,33 @@ def _parse_quote_text(text: str, source_uri: str = "") -> dict:
     total = max(totals) if totals else unit * qty
     if qty and unit and not totals:
         total = unit * qty
-    return {"vendor": vendor, "unit_price": unit, "quantity": qty,
-            "total": total, "source_uri": source_uri, "raw_text": t[:4000]}
+
+    # P0-2: Extract new trust fields
+    valid_until = _extract_valid_until(t)
+    legal_entity = _extract_legal_entity(t)
+    tax_included = _extract_tax_included(t)
+    currency = _extract_currency(t)
+    incoterms = _extract_incoterms(t)
+    source_hash = _compute_source_hash(source_uri) if source_uri else None
+
+    return {
+        "vendor": vendor,
+        "unit_price": unit,
+        "quantity": qty,
+        "total": total,
+        "source_uri": source_uri,
+        "raw_text": t[:4000],
+        "quote_date": _today_iso(),
+        "is_demo": False,
+        "valid_until": valid_until,
+        "retrieved_at": _today_iso(),
+        "legal_entity": legal_entity,
+        "tax_included": tax_included if tax_included is not None else True,
+        "currency": currency or "USD",
+        "incoterms": incoterms,
+        "status": "UNKNOWN",  # will be computed by quote_validity_check
+        "source_hash": source_hash,
+    }
 
 
 @register_tool("parse_quote_pdf", permission="general", retryable=False,
@@ -216,15 +344,21 @@ def extract_contract_terms(quote_text: str, vendor: str = "", source_uri: str = 
 @register_tool("score_spec", permission="procurement_spec",
                description="Score quote spec vs required spec → SpecScore JSON")
 def score_spec(quote_text: str, required_spec: str = "", vendor: str = "") -> str:
-    q, r = (quote_text or "").lower(), (required_spec or "").lower()
+    q = (quote_text or "").lower()
+    r = (required_spec or "").strip().lower()
+    # No spec was actually requested → the spec dimension is not applicable.
+    # We must NOT invent a failing score by scoring against generic keywords:
+    # that would disqualify every vendor for a requirement that was never given.
+    if not r or not [w for w in re.findall(r"[a-z0-9]+", r) if len(w) > 2]:
+        return _json.dumps({"vendor": vendor, "score": 100.0, "meets_minimum": True,
+                            "notes": "no required specification provided — spec N/A"})
     keywords = [w for w in re.findall(r"[a-z0-9]+", r) if len(w) > 2]
-    if not keywords:
-        keywords = ["cpu", "ram", "ssd", "display", "warranty"]
     hits = sum(1 for k in keywords if k in q)
     score = round(hits / max(1, len(keywords)) * 100, 1)
     return _json.dumps({"vendor": vendor, "score": score,
                         "meets_minimum": score >= 50.0,
                         "notes": f"{hits}/{len(keywords)} spec keywords matched"})
+
 
 @register_tool("web_search", permission="research", description="Mockable web search")
 def web_search(query: str, mock: str = "") -> str:

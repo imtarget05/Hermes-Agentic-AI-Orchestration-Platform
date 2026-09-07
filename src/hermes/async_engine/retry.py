@@ -36,6 +36,12 @@ _NON_RETRYABLE_MARKERS = (
     "schema error",
     "validation error",
     "malformed",
+    # HTTP 422 Unprocessable Entity = client data error (like invalid payload)
+    "422",
+    # Domain/business-rule violations are permanent by definition
+    "business rule",
+    "business_rule",
+    "invariant violated",
 )
 
 

@@ -115,6 +115,14 @@ def _terms_from_ctx(ctx: str) -> dict[str, dict]:
     return out
 
 
+def _spec_scores_from_ctx(ctx: str) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for o in _iter_json_objects(ctx):
+        if o.get("vendor") and "score" in o and "meets_minimum" in o:
+            out[str(o["vendor"])] = o
+    return out
+
+
 def _rag_index_path(task: Any) -> str:
     import os as _os
     payload = getattr(task, "payload", None) or {}
@@ -237,23 +245,76 @@ def build_procurement_handlers(store: Any = None) -> dict[str, Callable[[Any], s
         return "\n".join(lines)
 
     def _analysis(task: Any) -> str:
+        """Analysis handler using PolicyEngine for deterministic scoring."""
+        from ..decision import PolicyEngine
+        from ..procurement.schemas import (
+            ContractTerms,
+            Quote,
+            SpecScore,
+            VendorStatus,
+        )
+
+        # Load policy engine
+        policy_engine = PolicyEngine.load_policy("src/hermes/config/policy.yaml")
+
+        # Read sibling results
         sibs = _sibling_results(store, task, ["price-1", "vendor-1", "contract-1", "spec-1"])
+
         if sibs:
-            ctx = "\n".join(f"[{tid}] {res}" for tid, res in sibs.items())
-        else:  # fallback: rebuild context from payload quotes directly
+            # Parse all sibling outputs
+            all_objects = []
+            for tid, res in sibs.items():
+                all_objects.extend(_iter_json_objects(res))
+
+            quotes_data = [o for o in all_objects
+                           if o.get("vendor") and ("total" in o) and ("unit_price" in o)]
+            approved = {str(o["vendor"]): bool(o["approved"]) for o in all_objects
+                        if o.get("vendor") is not None and "approved" in o}
+            terms = {str(o["vendor"]): o for o in all_objects
+                     if o.get("vendor") and "warranty_years" in o}
+            spec_scores = {str(o["vendor"]): o for o in all_objects
+                           if o.get("vendor") and "score" in o and "meets_minimum" in o}
+        else:
+            # Fallback: rebuild from payload quotes directly
             quotes = _payload_quotes(task)
-            lines = [json.dumps(q) for q in quotes]
-            for q in quotes:
-                lines.append(json.dumps({"vendor": q.get("vendor", ""),
-                                         "approved": q.get("vendor", "").lower() in ("lenovo", "dell"),
-                                         "note": "payload fallback"}))
-                lines.append(json.dumps({"vendor": q.get("vendor", ""),
-                                         "payment": q.get("payment", "Net 30"),
-                                         "warranty_years": q.get("warranty_years", 3.0),
-                                         "sla_hours": q.get("sla_hours", 4.0),
-                                         "source_uri": q.get("source_uri", "")}))
-            ctx = "\n".join(lines)
-        return AGENTS["analysis"].run(_payload_request(task), ctx)
+            quotes_data = [dict(q) for q in quotes]
+            approved = {q.get("vendor", ""): q.get("vendor", "").lower() in ("lenovo", "dell")
+                        for q in quotes}
+            terms = {q.get("vendor", ""): {
+                "vendor": q.get("vendor", ""),
+                "payment": q.get("payment", "Net 30"),
+                "warranty_years": q.get("warranty_years", 3.0),
+                "sla_hours": q.get("sla_hours", 4.0),
+                "source_uri": q.get("source_uri", ""),
+            } for q in quotes}
+            spec_scores = {q.get("vendor", ""): {
+                "vendor": q.get("vendor", ""),
+                "score": 85.0,
+                "meets_minimum": True,
+                "notes": "payload fallback",
+            } for q in quotes}
+
+        # Build domain objects
+        quote_objs = [Quote(**q) for q in quotes_data]
+        vendor_statuses = {
+            v: VendorStatus(vendor=v, approved=approved.get(v, True))
+            for v in approved
+        }
+        contract_terms = {v: ContractTerms(**t) for v, t in terms.items()}
+        spec_score_objs = {v: SpecScore(**s) for v, s in spec_scores.items()}
+
+        # Evaluate via policy engine
+        rec = policy_engine.evaluate(
+            quote_objs, vendor_statuses, contract_terms, spec_score_objs
+        )
+
+        # The analysis task's machine contract is a single grounded
+        # Recommendation JSON (the async verifier `procurement_evidence_check`
+        # parses the whole output as JSON). Do NOT append agent prose after the
+        # JSON — that would fail the verifier ("recommendation is not grounded
+        # Recommendation JSON"). Keep it consistent with AnalysisAgent.think,
+        # which returns rec.model_dump_json() alone.
+        return rec.model_dump_json()
 
     def _verification(task: Any) -> str:
         sibs = _sibling_results(store, task, ["analysis-1"])

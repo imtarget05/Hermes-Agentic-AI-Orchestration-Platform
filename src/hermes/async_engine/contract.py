@@ -35,20 +35,49 @@ def new_id(prefix: str = "") -> str:
 class TaskStatus(str, Enum):
     CREATED = "created"
     QUEUED = "queued"
-    STARTED = "started"
+    RUNNING = "running"
+    PARTIAL = "partial"
+    BLOCKED = "blocked"
+    RETRYING = "retrying"
     COMPLETED = "completed"
-    RETRY = "retry"
     FAILED = "failed"
+    # HERMES-08: explicit terminal/edge statuses from the lifecycle spec
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+    DEADLETTER = "deadletter"
 
 
-# lifecycle for the async engine (subset, sufficient for idempotency + audit).
+# lifecycle for the async engine (extended for idempotency + resume + partial).
 ALLOWED_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.CREATED: {TaskStatus.QUEUED},
-    TaskStatus.QUEUED: {TaskStatus.STARTED, TaskStatus.FAILED},
-    TaskStatus.STARTED: {TaskStatus.COMPLETED, TaskStatus.RETRY, TaskStatus.FAILED},
-    TaskStatus.RETRY: {TaskStatus.STARTED, TaskStatus.FAILED},
+    TaskStatus.CREATED: {TaskStatus.QUEUED, TaskStatus.CANCELLED},
+    TaskStatus.QUEUED: {
+        TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED, TaskStatus.DEADLETTER,
+    },
+    TaskStatus.RUNNING: {
+        TaskStatus.COMPLETED,
+        TaskStatus.RETRYING,
+        TaskStatus.FAILED,
+        TaskStatus.PARTIAL,
+        TaskStatus.BLOCKED,
+        TaskStatus.TIMEOUT,
+        TaskStatus.CANCELLED,
+    },
+    TaskStatus.RETRYING: {
+        TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED,
+    },
+    TaskStatus.PARTIAL: {
+        TaskStatus.COMPLETED, TaskStatus.RETRYING, TaskStatus.FAILED,
+        TaskStatus.BLOCKED, TaskStatus.CANCELLED,
+    },
+    TaskStatus.BLOCKED: {
+        TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.COMPLETED, TaskStatus.CANCELLED,
+    },
+    TaskStatus.TIMEOUT: {TaskStatus.RETRYING, TaskStatus.FAILED, TaskStatus.DEADLETTER},
     TaskStatus.COMPLETED: set(),
-    TaskStatus.FAILED: set(),
+    TaskStatus.FAILED: {TaskStatus.RETRYING, TaskStatus.DEADLETTER},
+    TaskStatus.CANCELLED: set(),
+    TaskStatus.DEADLETTER: set(),
 }
 
 
@@ -72,6 +101,9 @@ class Task(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     status: TaskStatus = TaskStatus.CREATED
+    idempotency_key: str | None = None
+    execution_state: dict = Field(default_factory=dict)
+    resumed_from: str | None = None
 
     def to_message(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -93,7 +125,7 @@ class TaskResult(BaseModel):
 
 class Workflow(BaseModel):
     id: str = Field(default_factory=new_id)
-    status: str = "running"  # running | completed | failed
+    status: str = "running"
     created_at: str = Field(default_factory=_now)
     completed_at: str = ""
 
@@ -115,6 +147,7 @@ ROUTING: dict[str, tuple[str, str, str]] = {
     "analyze": (EXCHANGE_TASKS, "agent.analyze", "q.agent.analyze"),
     "report": (EXCHANGE_TASKS, "agent.report", "q.agent.report"),
     "notify": (EXCHANGE_TASKS, "agent.notify", "q.agent.notify"),
+    "scrape": (EXCHANGE_TASKS, "agent.scrape", "q.agent.scrape"),
     # Enterprise Procurement Case Agent — 4 parallel + join + verify
     "price": (EXCHANGE_TASKS, "agent.price", "q.agent.price"),
     "vendor": (EXCHANGE_TASKS, "agent.vendor", "q.agent.vendor"),

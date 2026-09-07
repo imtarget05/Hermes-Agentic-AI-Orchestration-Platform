@@ -117,5 +117,22 @@ services:
       - rabbitmq
       - postgres
 
+  scraper_worker:
+    build: .
+    container_name: hermes-scraper-worker
+    command: hermes-scraper
+    environment:
+      HERMES_ASYNC_MODE: rabbitmq
+      HERMES_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      HERMES_DATABASE_URL: postgresql://hermes:hermes@postgres:5432/hermes
+      HERMES_RAG_INDEX: /data/hermes.rag.json
+      HERMES_SCRAPER_POLICY: /app/config/scraper_policy.yaml
+    volumes:
+      - scraper_data:/data
+    depends_on:
+      - rabbitmq
+      - postgres
+
 volumes:
   pgdata:
+  scraper_data:

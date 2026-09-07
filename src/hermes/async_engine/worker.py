@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from .budgets import BudgetExceededError
 from .contract import (
     DEAD_LETTER_QUEUE,
     EVENT_COMPLETED,
@@ -31,8 +32,10 @@ from .contract import (
     EVENT_RETRIED,
     EVENT_STARTED,
     Task,
+    TaskStatus,
     routing_for,
 )
+from .eventbus import emit_best_effort
 from .loops.verify import VerificationError
 from .metrics import (
     TASK_DURATION,
@@ -71,6 +74,7 @@ class Worker:
         verifier: Verifier | None = None,
         breaker: CircuitBreaker | None = None,
         timeout_seconds: float = 30.0,
+        cost_tracker=None,
     ):
         from .loops.reliability import CircuitBreaker
         from .loops.verify import (
@@ -90,6 +94,7 @@ class Worker:
         self.verifier = verifier if verifier is not None else Verifier()
         self.breaker = breaker if breaker is not None else CircuitBreaker()
         self.timeout_seconds = timeout_seconds
+        self.cost_tracker = cost_tracker  # HERMES-09 workflow budget
         self.busy = False
         self.processed = 0
         self.failed = 0
@@ -133,6 +138,14 @@ class Worker:
             delivery.ack()  # already done — just acknowledge the duplicate
             return
 
+        # --- IDEMPOTENCY KEY CHECK: check if this specific execution was already processed ---
+        idempotency_key = raw.get("idempotency_key") or task.idempotency_key
+        if idempotency_key and self.verify_idempotency:
+            existing_task_id = self.store.check_idempotency_key(idempotency_key)
+            if existing_task_id and existing_task_id != task.task_id:
+                delivery.ack()  # duplicate execution - skip
+                return
+
         # --- RELIABILITY: circuit breaker (loop 6) ---
         if not self.breaker.allow(task.task_type):
             delivery.ack()
@@ -143,6 +156,10 @@ class Worker:
         if not self.store.mark_started(task.task_id, self.name):
             delivery.ack()  # another worker owns it, or it's completed
             return
+
+        # Store idempotency key after successful claim
+        if idempotency_key:
+            self.store.store_idempotency_key(idempotency_key, task.task_id)
 
         self.busy = True
         self.metrics.inc(WORKER_ACTIVE, 1.0)
@@ -157,9 +174,24 @@ class Worker:
             self.metrics.dec(WORKER_ACTIVE, 1.0)
 
     def _execute(self, task: Task, delivery) -> float:
+        # HERMES-09: hard stop when the workflow budget is exhausted.
+        # BudgetExceededError is NonRetryableError -> dead-letter, no retry loop.
+        if self.cost_tracker is not None:
+            stop = self.cost_tracker.exceeded()
+            if stop:
+                raise BudgetExceededError(stop)
         self.store.set_attempt(task.task_id, task.attempt)
-        self.events.emit(EVENT_STARTED, task_id=task.task_id,
+        emit_best_effort(self.events, EVENT_STARTED, task_id=task.task_id,
                          workflow_id=task.workflow_id, worker_id=self.name, attempt=task.attempt)
+
+        # Update execution state at start
+        exec_state = task.execution_state.copy()
+        exec_state["attempt"] = task.attempt
+        exec_state["status"] = TaskStatus.RUNNING.value
+        exec_state["started_at"] = time.time()
+        exec_state["worker_id"] = self.name
+        self.store.update_task_execution_state(task.task_id, exec_state)
+
         start = time.time()
         # loop 6: hard deadline around handler execution
         from .loops.reliability import run_with_timeout
@@ -167,6 +199,12 @@ class Worker:
         result_uri = run_with_timeout(lambda: self.handler(task),
                                       self.timeout_seconds, task.task_type)
         elapsed = time.time() - start
+
+        # Update execution state with partial result
+        exec_state["partial_result"] = result_uri
+        exec_state["elapsed"] = elapsed
+        self.store.update_task_execution_state(task.task_id, exec_state)
+
         # loop 5: verification before the result is accepted
         verdict = self.verifier.verify(task, result_uri)
         if not verdict.passed:
@@ -180,7 +218,7 @@ class Worker:
         self.breaker.record_success(task.task_type)  # loop 6
         self.metrics.inc(TASKS_COMPLETED, 1.0)
         self.metrics.observe(TASK_DURATION, duration)
-        self.events.emit(EVENT_COMPLETED, task_id=task.task_id,
+        emit_best_effort(self.events, EVENT_COMPLETED, task_id=task.task_id,
                          workflow_id=task.workflow_id, worker_id=self.name,
                          attempt=task.attempt, duration_ms=int(duration * 1000))
         delivery.ack()
@@ -201,10 +239,23 @@ class Worker:
             raw["attempt"] = new_attempt
             raw["retry_at"] = time.time() + delay
             raw["metadata"] = {**(raw.get("metadata") or {}), "last_error": str(error)[:300]}
+
+            # Update execution state for retry
+            exec_state = task.execution_state.copy()
+            exec_state["attempt"] = new_attempt
+            exec_state["status"] = TaskStatus.RETRYING.value
+            exec_state["last_error"] = str(error)[:300]
+            exec_state["retry_at"] = time.time() + delay
+            self.store.update_task_execution_state(task.task_id, exec_state)
+
             self.store.mark_retried(task.task_id, new_attempt, worker_id=self.name)
             self.metrics.inc(TASKS_RETRIED, 1.0)
-            self.events.emit(EVENT_RETRIED, task_id=task.task_id, workflow_id=task.workflow_id,
+            emit_best_effort(self.events, EVENT_RETRIED, task_id=task.task_id, workflow_id=task.workflow_id,
                              worker_id=self.name, attempt=new_attempt, error=str(error)[:300])
+            # Generate new idempotency key for retry
+            new_key = f"{task.workflow_id}:{task.task_id}:{new_attempt}"
+            import hashlib
+            raw["idempotency_key"] = hashlib.sha256(new_key.encode()).hexdigest()[:32]
             # requeue for delivery after backoff, then ACK the consumed copy
             self.bus.requeue(queue, raw, delay_seconds=delay)
             delivery.ack()
@@ -224,7 +275,7 @@ class Worker:
                 from .loops.reliability import escalation_metadata
                 probe = Task.from_message(raw)
                 raw["metadata"].update(escalation_metadata(probe, reason))
-                self.events.emit("task.escalated", task_id=task_id,
+                emit_best_effort(self.events, "task.escalated", task_id=task_id,
                                  workflow_id=raw.get("workflow_id", ""),
                                  worker_id=self.name, reason=reason[:200])
             except Exception:
@@ -236,7 +287,7 @@ class Worker:
                 self.bus.publish_to_queue(DEAD_LETTER_QUEUE, raw)
             self.store.mark_failed(task_id, reason, worker_id=self.name)
             self.metrics.inc(TASKS_FAILED, 1.0)
-            self.events.emit(EVENT_FAILED, task_id=task_id, workflow_id=raw.get("workflow_id", ""),
+            emit_best_effort(self.events, EVENT_FAILED, task_id=task_id, workflow_id=raw.get("workflow_id", ""),
                              worker_id=self.name, attempt=raw.get("attempt", 1), error=reason)
         except Exception:
             pass

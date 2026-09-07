@@ -61,6 +61,26 @@ class TaskDAG:
     def mark_failed(self, task_id: str) -> None:
         self.status[task_id] = "failed"
 
+    def descendants(self, task_id: str) -> list[str]:
+        """All transitive dependents of a task (BFS over the dependents graph).
+
+        Used by the orchestrator's failure cascade (HERMES-06): when a task
+        terminally fails, every downstream task must be resolved too, so the
+        DAG can never deadlock waiting on a node that will never complete.
+        """
+        out: list[str] = []
+        frontier = [task_id]
+        seen = {task_id}
+        while frontier:
+            cur = frontier.pop()
+            for child in self.dependents.get(cur, set()):
+                if child in seen:
+                    continue  # cycle-safe
+                seen.add(child)
+                out.append(child)
+                frontier.append(child)
+        return out
+
     def roots(self) -> list[str]:
         return [tid for tid, deps in self.dependencies.items() if not deps]
 

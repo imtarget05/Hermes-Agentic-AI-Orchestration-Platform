@@ -1,5 +1,13 @@
 """Central settings. Secrets via env only, never committed."""
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from __future__ import annotations
+
+try:
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+except ModuleNotFoundError:
+    from pydantic import BaseModel, ConfigDict
+
+    BaseSettings = BaseModel  # type: ignore[misc,assignment]
+    SettingsConfigDict = ConfigDict  # type: ignore[misc,assignment]
 
 
 class Settings(BaseSettings):
@@ -14,6 +22,12 @@ class Settings(BaseSettings):
     cloudflare_timeout: int = 60
     telegram_bot_token: str = ""
     telegram_allowed_users: str = ""
+    # ---- Telegram 1:1 chat (webhook + tunnel, local-first) ----
+    telegram_webhook_secret: str = ""
+    telegram_webhook_url: str = ""
+    telegram_session_db: str = "./telegram_sessions.db"
+    telegram_mode: str = "webhook"  # webhook | polling
+    telegram_max_history: int = 20
     hermes_db_path: str = "./hermes_tasks.db"
     hermes_database_url: str = ""  # set → Postgres backend (psycopg3), else SQLite
     hermes_routing_path: str = "./routing.json"

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from hermes.async_engine.loops.hitl import ApprovalStore
 from hermes.messaging.approval_bot import resolve_approval
 from hermes.procurement import run_procurement_case
@@ -18,6 +20,7 @@ def _quotes():
 
 
 def test_pdf_parse_extracts_vendors_and_totals(tmp_path):
+    pytest.importorskip("pypdf")
     sandbox = str(tmp_path / "sandbox")
     paths = ensure_demo_quote_pdfs(sandbox)
     assert len(paths) == 3

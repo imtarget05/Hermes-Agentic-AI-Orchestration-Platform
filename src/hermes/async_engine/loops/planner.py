@@ -115,14 +115,48 @@ class Planner:
 
     # -- public API -------------------------------------------------------- #
     def plan(self, request: str) -> list[dict[str, Any]]:
-        """Return a validated DAG spec. LLM plan preferred, template fallback."""
+        """Return a validated DAG spec. LLM plan preferred, template fallback.
+
+        HERMES-01: the plan is capped at MAX_TASKS_PER_WORKFLOW nodes — an
+        LLM proposing an oversized/recursive graph is truncated deterministically
+        (roots and joins kept, depth bounded) rather than spawned unbounded.
+        """
         nodes = self._llm_plan(request) or self._template(request)
+        nodes = self._cap_nodes(nodes)
         # apply learned retry budgets (loop 8 -> loop 2 feedback)
         attempts = dict(DEFAULT_MAX_ATTEMPTS)
         attempts.update(self.policy.get("max_attempts", {}))
         for n in nodes:
             n["max_attempts"] = attempts.get(n["task_type"], 3)
         return nodes
+
+    @staticmethod
+    def _cap_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Bound the plan size (HERMES-01). Keeps dependency closure of the
+        first `max_nodes` tasks so no remaining task references a dropped one."""
+        from ..budgets import DEFAULT_LIMITS
+
+        max_nodes = DEFAULT_LIMITS.max_tasks
+        if len(nodes) <= max_nodes:
+            return nodes
+        by_id = {n["task_id"]: n for n in nodes}
+        kept: list[dict[str, Any]] = []
+        kept_ids: set[str] = set()
+
+        def keep(node: dict[str, Any]) -> None:
+            if node["task_id"] in kept_ids:
+                return
+            kept_ids.add(node["task_id"])
+            for d in node.get("deps") or []:
+                if d in by_id:
+                    keep(by_id[d])
+            kept.append(node)
+
+        for n in nodes:
+            if len(kept) >= max_nodes:
+                break
+            keep(n)
+        return kept[:max_nodes]
 
     def plan_with_context(self, request: str, context) -> tuple[list[dict[str, Any]], Any]:
         """Convenience: plan and attach the execution context to each node."""

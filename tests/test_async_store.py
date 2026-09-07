@@ -32,7 +32,7 @@ def test_mark_started_and_results(tmp_path):
     s = _store(tmp_path)
     s.create_task(_task())
     assert s.mark_started("t1", "worker-01") is True
-    assert s.get_task("t1").status == TaskStatus.STARTED
+    assert s.get_task("t1").status == TaskStatus.RUNNING
     s.mark_completed("t1", result_uri="s3://b/1", worker_id="worker-01")
     assert s.is_completed("t1") is True
     results = s.task_results("t1")
@@ -61,7 +61,7 @@ def test_mark_retried_increments_attempt(tmp_path):
     s.create_task(_task())
     s.mark_retried("t1", attempt=2, worker_id="worker-01")
     t = s.get_task("t1")
-    assert t.attempt == 2 and t.status == TaskStatus.RETRY
+    assert t.attempt == 2 and t.status == TaskStatus.RETRYING
 
 
 def test_mark_failed_records_error(tmp_path):

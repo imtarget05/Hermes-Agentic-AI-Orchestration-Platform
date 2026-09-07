@@ -12,7 +12,7 @@ def test_task_contract_has_canonical_fields():
     msg = t.to_message()
     for key in ("task_id", "workflow_id", "parent_task_id", "task_type",
                 "priority", "attempt", "max_attempts", "created_at", "deadline",
-                "payload", "metadata"):
+                "payload", "metadata", "idempotency_key", "execution_state", "resumed_from"):
         assert key in msg, f"missing canonical field {key}"
     assert t.status == TaskStatus.CREATED
 
@@ -37,9 +37,9 @@ def test_unknown_routing_key_raises():
 def test_validate_transition():
     from hermes.async_engine.contract import validate_transition
     validate_transition(TaskStatus.CREATED, TaskStatus.QUEUED)
-    validate_transition(TaskStatus.STARTED, TaskStatus.RETRY)
+    validate_transition(TaskStatus.RUNNING, TaskStatus.RETRYING)
     try:
-        validate_transition(TaskStatus.COMPLETED, TaskStatus.STARTED)
+        validate_transition(TaskStatus.COMPLETED, TaskStatus.RUNNING)
         raise AssertionError("expected illegal transition error")
     except ValueError:
         pass

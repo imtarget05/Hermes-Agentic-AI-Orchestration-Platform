@@ -13,9 +13,9 @@ _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-import gradio as gr
+import gradio as gr  # noqa: E402
 
-from hermes.api import app as fastapi_app
+from hermes.api import app as fastapi_app  # noqa: E402
 
 with gr.Blocks(title="Hermes — Agentic AI Platform") as demo:
     gr.Markdown(

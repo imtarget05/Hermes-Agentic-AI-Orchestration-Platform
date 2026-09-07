@@ -3,6 +3,8 @@
 Request → procurement DAG (4 parallel roots → analysis join → verification)
 executed by AsyncOrchestrator + WorkerPool over InMemoryBus (or any bus),
 with evidence-grounded verification wired into the workers.
+
+Now accepts RoutingPlan for router-first architecture (P0-1).
 """
 from __future__ import annotations
 
@@ -10,10 +12,12 @@ import os
 from typing import Any
 
 from ..async_engine.backends import InMemoryBus
+from ..async_engine.contract import new_id, routing_for
 from ..async_engine.loops.verify import PROCUREMENT_VALIDATORS, Verifier
 from ..async_engine.orchestrator import AsyncOrchestrator
 from ..async_engine.store import AsyncTaskStore
-from .handlers import build_procurement_graph, build_procurement_handlers
+from ..router import FULL_PROCUREMENT_AGENTS, RoutingPlan
+from .handlers import build_procurement_handlers
 
 
 def default_procurement_db(sync_db_path: str = "./hermes_tasks.db") -> str:
@@ -28,6 +32,57 @@ def default_procurement_db(sync_db_path: str = "./hermes_tasks.db") -> str:
     return base + "_procurement.db"
 
 
+def _build_graph_for_plan(
+    request: str,
+    quotes: list[dict[str, Any]],
+    required_spec: str,
+    routing_plan: RoutingPlan,
+    rag_index: str = "",
+) -> list[dict[str, Any]]:
+    """Build DAG graph based on routing plan's required agents."""
+    payload = {"request": request, "quotes": quotes, "required_spec": required_spec,
+               "rag_index": rag_index}
+    
+    agents = routing_plan.required_agents
+    if not agents:
+        # Default to full procurement if no agents specified
+        agents = FULL_PROCUREMENT_AGENTS
+    
+    # Map agent names to task definitions
+    agent_tasks = {
+        "price": {"task_id": "price-1", "task_type": "price", "deps": [], "payload": dict(payload)},
+        "vendor": {"task_id": "vendor-1", "task_type": "vendor", "deps": [], "payload": dict(payload)},
+        "contract": {"task_id": "contract-1", "task_type": "contract", "deps": [], "payload": dict(payload)},
+        "spec": {"task_id": "spec-1", "task_type": "spec", "deps": [], "payload": dict(payload)},
+        "analysis": {"task_id": "analysis-1", "task_type": "analysis", "deps": [], "payload": dict(payload)},
+        "verification": {"task_id": "verification-1", "task_type": "verification", "deps": [], "payload": dict(payload)},
+    }
+    
+    # Build graph in topological order
+    graph = []
+    completed = set()
+    
+    # First pass: add leaf agents (no deps among themselves)
+    for agent in agents:
+        if agent in ("price", "vendor", "contract", "spec"):
+            graph.append(agent_tasks[agent])
+            completed.add(agent)
+    
+    # Second pass: add analysis if any leaf agents were included
+    leaf_agents = {"price", "vendor", "contract", "spec"} & set(agents)
+    if leaf_agents and "analysis" in agents:
+        analysis_task = dict(agent_tasks["analysis"])
+        analysis_task["deps"] = [f"{a}-1" for a in leaf_agents]
+        graph.append(analysis_task)
+        completed.add("analysis")
+    
+    # Third pass: add verification if analysis was included
+    if "analysis" in completed and "verification" in agents:
+        graph.append(agent_tasks["verification"])
+    
+    return graph
+
+
 def run_procurement_case(
     request: str,
     quotes: list[dict[str, Any]],
@@ -37,15 +92,34 @@ def run_procurement_case(
     db_path: str = "",
     store: AsyncTaskStore | None = None,
     bus: Any | None = None,
+    routing_plan: RoutingPlan | None = None,
 ) -> dict[str, Any]:
-    """Execute the full procurement DAG. Returns the aggregate report.
+    """Execute the procurement DAG based on routing plan. Returns the aggregate report.
 
     The verification node output (agent text) is returned under
     `aggregate["results"]["verification-1"]`, and the parsed Recommendation
     JSON under `aggregate["recommendation"]`.
+
+    Args:
+        request: User request text
+        quotes: List of quote dicts
+        required_spec: Required specification string
+        workers: Number of parallel workers
+        timeout: Timeout in seconds
+        db_path: Database path
+        store: Optional AsyncTaskStore
+        bus: Optional message bus
+        routing_plan: Optional RoutingPlan for router-first architecture.
+                     If not provided, defaults to full procurement (6 agents).
     """
     own_store = store or AsyncTaskStore(db_path or default_procurement_db())
     own_bus = bus if bus is not None else InMemoryBus()
+    
+    # Use provided routing plan or default to full procurement
+    if routing_plan is None:
+        from ..router import route
+        routing_plan = route(request)
+    
     # Multi-Agent RAG: index the case corpus (quotes + vendor registry + spec)
     # so every specialist retrieves cited evidence instead of reasoning blind.
     from ..rag import build_case_index
@@ -54,12 +128,30 @@ def run_procurement_case(
         build_case_index(quotes, required_spec).save(rag_path)
     except Exception:
         rag_path = ""
-    graph = build_procurement_graph(request, quotes, required_spec, rag_index=rag_path)
+    
+    # Emit scrape trigger for external data enrichment (scraper_worker consumes this).
+    try:
+        from ..scraper.contract import ScrapeSource, ScrapeTask
+        vendor_names = list({str(q.get("vendor", "")) for q in quotes if q.get("vendor")})
+        keys = [request] + [f"{v} price list" for v in vendor_names[:5]]
+        scrape_task = ScrapeTask(
+            task_id=new_id("scrape-"),
+            keys=keys,
+            source_type=ScrapeSource.WEB,
+            policy={},
+        )
+        ex, rk, q = routing_for("scrape")
+        own_bus.publish(ex, rk, scrape_task.model_dump())
+    except Exception:
+        pass
+    
+    graph = _build_graph_for_plan(request, quotes, required_spec, routing_plan, rag_path)
     handlers = build_procurement_handlers(own_store)
     verifier = Verifier(by_task_type=dict(PROCUREMENT_VALIDATORS))
     orch = AsyncOrchestrator(own_store, own_bus)
     agg = orch.run_workflow(graph, handlers, workers=workers, timeout=timeout,
                             verifier=verifier)
+    
     # surface the parsed recommendation for API/Telegram layers
     rec: dict[str, Any] = {}
     try:
@@ -89,6 +181,7 @@ def run_procurement_case(
         rec = {}
     agg["recommendation"] = rec
     agg["rag_index"] = rag_path
+    agg["routing_plan"] = routing_plan.model_dump() if routing_plan else None
     return agg
 
 
@@ -125,7 +218,10 @@ def run_procurement_benchmark(
             build_case_index(quotes, required_spec).save(rag_path)
         except Exception:
             rag_path = ""
-        graph = build_procurement_graph(request, quotes, required_spec, rag_index=rag_path)
+        # Use full procurement graph for benchmark
+        from ..router import route
+        routing_plan = route(request)
+        graph = _build_graph_for_plan(request, quotes, required_spec, routing_plan, rag_path)
         handlers = build_procurement_handlers(store)
         if handler_delay_ms > 0:
             delay_s = handler_delay_ms / 1000.0

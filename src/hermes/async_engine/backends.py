@@ -121,12 +121,21 @@ class RabbitMQBus:
     """
 
     def __init__(self, url: str = "amqp://guest:guest@localhost:5672/%2F",
-                 exchanges: tuple[tuple[str, str, bool], ...] | None = None):
+                 exchanges: tuple[tuple[str, str, bool], ...] | None = None,
+                 prefetch_count: int | None = None):
+        import os
+
         self.url = url
         self.exchanges = exchanges or (
             ("hermes.tasks", "direct", True),
             ("hermes.retry", "direct", True),
             ("hermes.dlx", "fanout", True),
+        )
+        # HERMES-04: fair dispatch — cap unacked messages per consumer so one
+        # slow worker cannot hoard the queue. Env-tunable, 0 disables.
+        self.prefetch_count = int(
+            prefetch_count if prefetch_count is not None
+            else os.environ.get("HERMES_PREFETCH_COUNT", "10") or 10
         )
         self._conn = None
         self._channel = None
@@ -138,6 +147,8 @@ class RabbitMQBus:
         self._conn = pika.BlockingConnection(params)
         self._channel = self._conn.channel()
         self._channel.confirm_delivery()
+        if self.prefetch_count:
+            self._channel.basic_qos(prefetch_count=self.prefetch_count)
         for name, typ, durable in self.exchanges:
             self._channel.exchange_declare(exchange=name, exchange_type=typ, durable=durable)
         return self._channel

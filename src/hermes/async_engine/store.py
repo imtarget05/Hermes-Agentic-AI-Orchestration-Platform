@@ -6,12 +6,14 @@ Tables (spec §8 + idempotency §7):
   task_results      result_uri / result_hash (audit + evidence)
   execution_state   task_id -> execution state (idempotency: "completed" rows
                     are never re-executed even if a message is re-delivered)
+  idempotency_keys  key -> task_id mapping for deduplication
 
 Postgres when `dsn` given, else SQLite (local default).
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 from datetime import UTC, datetime
@@ -27,7 +29,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority INTEGER, attempt INTEGER, max_attempts INTEGER,
     status TEXT, error TEXT, worker_id TEXT,
     created_at TEXT, started_at TEXT, completed_at TEXT, deadline TEXT,
-    payload TEXT, metadata TEXT
+    payload TEXT, metadata TEXT,
+    idempotency_key TEXT, execution_state TEXT, resumed_from TEXT
 )
 """
 
@@ -42,6 +45,23 @@ CREATE TABLE IF NOT EXISTS task_results (
     rowid BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     task_id TEXT, status TEXT, result_uri TEXT, result_hash TEXT, created_at TEXT
 )
+"""
+
+# HERMES-05: DB-level idempotency — one result row per (task_id, status).
+# A retried/redelivered task UPSERTS its result; duplicates are impossible
+# at the storage layer, not just in application code.
+_DDL_TASK_RESULTS_UX = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_task_results_task_status "
+    "ON task_results (task_id, status)"
+)
+
+_UPSERT_TASK_RESULT = """
+INSERT INTO task_results (task_id, status, result_uri, result_hash, created_at)
+VALUES (?,?,?,?,?)
+ON CONFLICT(task_id, status) DO UPDATE SET
+    result_uri=excluded.result_uri,
+    result_hash=excluded.result_hash,
+    created_at=excluded.created_at
 """
 
 _DDL_WORKFLOWS = """
@@ -62,6 +82,14 @@ CREATE TABLE IF NOT EXISTS task_dependencies (
 )
 """
 
+_DDL_IDEMPOTENCY_KEYS = """
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    idempotency_key TEXT PRIMARY KEY,
+    task_id TEXT,
+    created_at TEXT
+)
+"""
+
 
 class _Backend:
     """Wrapper unifying sqlite3 and psycopg3 connections."""
@@ -73,8 +101,6 @@ class _Backend:
             import psycopg
             self._connect = lambda: psycopg.connect(dsn)
         else:
-            # timeout=30: WorkerPool threads share one SQLite file; busy-wait
-            # instead of failing fast with "database is locked".
             self._connect = lambda: sqlite3.connect(db_path, timeout=30.0)
 
     def init(self) -> None:
@@ -83,12 +109,14 @@ class _Backend:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             con.executescript(
                 _DDL_TASKS + ";" + _DDL_TASK_RESULTS + ";"
-                + _DDL_WORKFLOWS + ";" + _DDL_EXEC_STATE + ";" + _DDL_TASK_DEPS + ";"
+                + _DDL_WORKFLOWS + ";" + _DDL_EXEC_STATE + ";" + _DDL_TASK_DEPS + ";" + _DDL_IDEMPOTENCY_KEYS + ";"
             )
+            con.execute(_DDL_TASK_RESULTS_UX)
         else:
             for ddl in (_DDL_TASKS, _DDL_TASK_RESULTS_PG, _DDL_WORKFLOWS,
-                        _DDL_EXEC_STATE, _DDL_TASK_DEPS):
+                        _DDL_EXEC_STATE, _DDL_TASK_DEPS, _DDL_IDEMPOTENCY_KEYS):
                 con.execute(ddl)
+            con.execute(_DDL_TASK_RESULTS_UX)
         con.commit()
         con.close()
 
@@ -120,6 +148,23 @@ class AsyncTaskStore:
         con.close()
         return out
 
+    def _exec_count(self, sql: str, params: tuple = ()) -> int:
+        """Execute a statement and return the number of rows affected.
+
+        Used for atomic compare-and-set claims (e.g. mark_started) so a
+        conditional UPDATE can report whether THIS call won the row.
+        """
+        con = self.backend._connect()
+        cur = con.cursor()
+        if self.dsn:
+            cur = con.cursor()
+            sql = sql.replace("?", "%s")
+        cur.execute(sql, params)
+        n = cur.rowcount
+        con.commit()
+        con.close()
+        return n
+
     # ---- workflows ----
     def create_workflow(self, workflow_id: str) -> Workflow:
         wf = Workflow(id=workflow_id)
@@ -142,14 +187,16 @@ class AsyncTaskStore:
         at = _now()
         self._exec("UPDATE workflows SET status=?, completed_at=? WHERE id=?",
                    (status, at, workflow_id))
-# ---- tasks ----
+
+    # ---- tasks ----
     def create_task(self, task: Task) -> Task:
         self._exec(
-            "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (task.task_id, task.workflow_id, task.parent_task_id, task.task_type,
              task.priority, task.attempt, task.max_attempts, task.status.value,
              "", "", task.created_at, "", "", task.deadline,
-             _dumps(task.payload), _dumps(task.metadata)),
+             _dumps(task.payload), _dumps(task.metadata),
+             task.idempotency_key or "", _dumps(task.execution_state), task.resumed_from or ""),
         )
         self._exec(
             "INSERT OR REPLACE INTO execution_state (task_id, state, attempt, updated_at) "
@@ -172,6 +219,9 @@ class AsyncTaskStore:
             status=TaskStatus(d["status"]), created_at=d["created_at"],
             deadline=d["deadline"] or "", payload=_loads(d["payload"] or "{}"),
             metadata=_loads(d["metadata"] or "{}"),
+            idempotency_key=d.get("idempotency_key") or None,
+            execution_state=_loads(d.get("execution_state") or "{}"),
+            resumed_from=d.get("resumed_from") or None,
         )
 
     def list_workflow_tasks(self, workflow_id: str) -> list[Task]:
@@ -215,29 +265,55 @@ class AsyncTaskStore:
                                 TaskStatus.COMPLETED.value, limit), fetch="all") or []
         return [self._row_to_task(dict(r)) for r in rows]
 
+    def fail_tasks_with_failed_deps(self, limit: int = 200) -> list[str]:
+        """HERMES-06: terminate queued tasks whose upstream dependency already
+        failed — the cross-process advancer's deadlock guard. Returns the ids
+        it failed."""
+        sql = (
+            "SELECT t.task_id FROM tasks t WHERE t.status = ? AND EXISTS ("
+            "  SELECT 1 FROM task_dependencies d"
+            "  JOIN tasks dt ON dt.task_id = d.depends_on"
+            "  WHERE d.task_id = t.task_id AND dt.status = ?"
+            ") LIMIT ?"
+        )
+        rows = self._exec(sql, (TaskStatus.QUEUED.value, TaskStatus.FAILED.value, limit),
+                          fetch="all") or []
+        failed = []
+        for r in rows:
+            tid = dict(r)["task_id"]
+            self.mark_failed(tid, "upstream dependency failed — DAG stuck-task sweep",
+                             worker_id="advancer")
+            failed.append(tid)
+        return failed
+
     def finalize_workflows(self) -> list[str]:
         """Mark 'running' workflows completed/failed once every task is terminal.
         Returns the list of finalized workflow ids."""
         rows = self._exec(
             "SELECT w.id AS id, COUNT(t.task_id) AS total, "
             "SUM(CASE WHEN t.status = ? THEN 1 ELSE 0 END) AS done, "
-            "SUM(CASE WHEN t.status = ? THEN 1 ELSE 0 END) AS failed "
+            "SUM(CASE WHEN t.status = ? THEN 1 ELSE 0 END) AS failed, "
+            "SUM(CASE WHEN t.status = ? THEN 1 ELSE 0 END) AS partial "
             "FROM workflows w JOIN tasks t ON t.workflow_id = w.id "
             "WHERE w.status = 'running' GROUP BY w.id",
-            (TaskStatus.COMPLETED.value, TaskStatus.FAILED.value), fetch="all",
+            (TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.PARTIAL.value), fetch="all",
         ) or []
         finalized = []
         for r in rows:
             d = dict(r)
             if not d["total"]:
                 continue
-            status = "failed" if d["failed"] else (
-                "completed" if d["done"] == d["total"] else None)
+            failed_count = d["failed"]
+            partial_count = d["partial"]
+            completed_count = d["done"]
+            status = "failed" if failed_count else (
+                "completed" if (completed_count + partial_count) == d["total"] else None)
             if status:
                 self.complete_workflow(d["id"], status)
                 finalized.append(d["id"])
         return finalized
-# ---- idempotency / execution state ----
+
+    # ---- idempotency / execution state ----
     def execution_state(self, task_id: str) -> str | None:
         row = self._exec("SELECT state FROM execution_state WHERE task_id=?",
                          (task_id,), fetch="one")
@@ -248,15 +324,25 @@ class AsyncTaskStore:
 
     def mark_started(self, task_id: str, worker_id: str) -> bool:
         """Atomic claim: True if this worker may execute. False if the task is
-        already completed (idempotency) or already STARTED by another worker."""
-        state = self.execution_state(task_id)
-        if state in (TaskStatus.COMPLETED.value, TaskStatus.STARTED.value):
-            return False
-        self._exec("UPDATE execution_state SET state=?, updated_at=? WHERE task_id=?",
-                   (TaskStatus.STARTED.value, _now(), task_id))
+        already completed (idempotency) or already STARTED by another worker.
+
+        HERMES-04-FU1: the claim is a single conditional UPDATE — the
+        compare-and-set happens inside the statement, so two consumers racing
+        on the same task_id cannot both win. Exactly one gets rowcount==1; the
+        loser observes the already-running/completed row (rowcount==0) and
+        must not execute.
+        """
+        n = self._exec_count(
+            "UPDATE execution_state SET state=?, updated_at=? "
+            "WHERE task_id=? AND state NOT IN (?,?)",
+            (TaskStatus.RUNNING.value, _now(), task_id,
+             TaskStatus.COMPLETED.value, TaskStatus.RUNNING.value),
+        )
+        if n != 1:
+            return False  # lost the race, or already completed
         self._exec("UPDATE tasks SET status=?, worker_id=?, started_at=COALESCE(?, started_at) "
                    "WHERE task_id=?",
-                   (TaskStatus.STARTED.value, worker_id, _now(), task_id))
+                   (TaskStatus.RUNNING.value, worker_id, _now(), task_id))
         return True
 
     def mark_completed(self, task_id: str, result_uri: str = "", result_hash: str = "",
@@ -267,8 +353,7 @@ class AsyncTaskStore:
         self._exec("UPDATE tasks SET status=?, worker_id=?, completed_at=? WHERE task_id=?",
                    (TaskStatus.COMPLETED.value, worker_id, at, task_id))
         self._exec(
-            "INSERT INTO task_results (task_id, status, result_uri, result_hash, created_at) "
-            "VALUES (?,?,?,?,?)",
+            _UPSERT_TASK_RESULT,
             (task_id, "completed", result_uri, result_hash or _hash(result_uri), at),
         )
 
@@ -280,23 +365,73 @@ class AsyncTaskStore:
                    "WHERE task_id=?",
                    (TaskStatus.FAILED.value, error[:300], worker_id, at, task_id))
         self._exec(
-            "INSERT INTO task_results (task_id, status, result_uri, result_hash, created_at) "
-            "VALUES (?,?,?,?,?)",
+            _UPSERT_TASK_RESULT,
             (task_id, "failed", "", _hash(error), at),
         )
 
     def mark_retried(self, task_id: str, attempt: int, worker_id: str = "") -> None:
         self._exec("UPDATE execution_state SET state=?, attempt=?, updated_at=? "
                    "WHERE task_id=?",
-                   (TaskStatus.RETRY.value, attempt, _now(), task_id))
+                   (TaskStatus.RETRYING.value, attempt, _now(), task_id))
         self._exec("UPDATE tasks SET status=?, worker_id=?, attempt=? WHERE task_id=?",
-                   (TaskStatus.RETRY.value, worker_id, attempt, task_id))
+                   (TaskStatus.RETRYING.value, worker_id, attempt, task_id))
 
     def mark_dispatched(self, task_id: str) -> None:
         """Advancer bookkeeping: message is on the bus, awaiting a worker claim
         (prevents the advancer from re-publishing the same task)."""
         self._exec("UPDATE execution_state SET state=?, updated_at=? WHERE task_id=?",
                    (TaskStatus.QUEUED.value, _now(), task_id))
+
+    # ---- idempotency key methods ----
+    def store_idempotency_key(self, key: str, task_id: str) -> bool:
+        """Record a processed idempotency key. Returns True if newly stored, False if already exists."""
+        try:
+            self._exec(
+                "INSERT INTO idempotency_keys (idempotency_key, task_id, created_at) VALUES (?,?,?)",
+                (key, task_id, _now()),
+            )
+            return True
+        except Exception:
+            return False
+
+    def check_idempotency_key(self, key: str) -> str | None:
+        """Check if an idempotency key was already processed. Returns task_id if found."""
+        row = self._exec("SELECT task_id FROM idempotency_keys WHERE idempotency_key=?",
+                         (key,), fetch="one")
+        return row["task_id"] if row else None
+
+    def get_tasks_for_resume(self, workflow_id: str) -> list[Task]:
+        """Returns tasks with execution_state for resume capability."""
+        rows = self._exec(
+            "SELECT * FROM tasks WHERE workflow_id=? AND status IN (?,?,?,?) ORDER BY priority",
+            (workflow_id, TaskStatus.RUNNING.value, TaskStatus.PARTIAL.value,
+             TaskStatus.BLOCKED.value, TaskStatus.RETRYING.value), fetch="all") or []
+        return [self._row_to_task(dict(r)) for r in rows]
+
+    def update_task_execution_state(self, task_id: str, state: dict) -> None:
+        """Persist execution_state for resume capability."""
+        self._exec(
+            "UPDATE tasks SET execution_state=? WHERE task_id=?",
+            (_dumps(state), task_id),
+        )
+        # Also update execution_state table
+        attempt = state.get("attempt", 1)
+        current_status = state.get("status", TaskStatus.RUNNING.value)
+        self._exec("UPDATE execution_state SET state=?, attempt=?, updated_at=? WHERE task_id=?",
+                   (current_status, attempt, _now(), task_id))
+
+    def mark_task_partial(self, task_id: str, partial_results: dict) -> None:
+        """Set status=PARTIAL with partial results in execution_state."""
+        task = self.get_task(task_id)
+        exec_state = task.execution_state.copy()
+        exec_state["partial_results"] = partial_results
+        exec_state["status"] = TaskStatus.PARTIAL.value
+        self._exec(
+            "UPDATE tasks SET status=?, execution_state=? WHERE task_id=?",
+            (TaskStatus.PARTIAL.value, _dumps(exec_state), task_id),
+        )
+        self._exec("UPDATE execution_state SET state=?, updated_at=? WHERE task_id=?",
+                   (TaskStatus.PARTIAL.value, _now(), task_id))
 
     def task_results(self, task_id: str) -> list[dict]:
         rows = self._exec("SELECT * FROM task_results WHERE task_id=? ORDER BY rowid",
@@ -323,12 +458,10 @@ def _now() -> str:
 
 
 def _dumps(o: Any) -> str:
-    import json
     return json.dumps(o, default=str)
 
 
 def _loads(s: str) -> Any:
-    import json
     try:
         return json.loads(s)
     except Exception:

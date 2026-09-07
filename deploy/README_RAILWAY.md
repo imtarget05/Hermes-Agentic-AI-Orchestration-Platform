@@ -11,6 +11,7 @@ Region chính: **asia-southeast1-eqsg3a** (Singapore) — đã set trong `railwa
 | `research-worker` | 2 | `python -m hermes.async_engine.cli work` | `HERMES_WORKER_TASK_TYPES=research` |
 | `analyze-worker` | 2 | `python -m hermes.async_engine.cli work` | `HERMES_WORKER_TASK_TYPES=analyze` |
 | `report-worker` | 1 | `python -m hermes.async_engine.cli work` | `HERMES_WORKER_TASK_TYPES=report` |
+| `scraper-worker` | 1 | `hermes-scraper` | `HERMES_SCRAPER_POLICY=config/scraper_policy.yaml` |
 
 Mọi service dùng chung repo + `Dockerfile` (`railway.json` build DOCKERFILE).
 
@@ -23,6 +24,16 @@ Mọi service dùng chung repo + `Dockerfile` (`railway.json` build DOCKERFILE).
 | `HERMES_DATABASE_URL` | `postgresql://...` (Railway Postgres, cùng region) |
 | `KAFKA_BOOTSTRAP_SERVERS` | `<kafka-service>.railway.internal:9092` (template Kafka) |
 | `HERMES_WORKER_TASK_TYPES` | *(chỉ worker services — xem bảng trên)* |
+| `HERMES_SCRAPER_POLICY` | *(chỉ scraper-worker)* |
+
+## Scraper worker notes
+
+- The `scraper-worker` subscribes to `agent.scrape` queue and writes scraped
+  documents into the shared `RagIndex` JSON file (`HERMES_RAG_INDEX`).
+- It runs independently of the main deployment; if it is down, procurement
+  still works (falls back to existing quotes/DEMO data).
+- Policy (`scraper_policy.yaml`) controls rate limits, TTL, and allowed/blocked
+  domains. Defaults are defined in `src/hermes/config/policy.yaml`.
 
 ## Infra cùng region Singapore
 

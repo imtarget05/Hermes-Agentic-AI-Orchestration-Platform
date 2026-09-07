@@ -29,7 +29,16 @@ _DDL = """
 CREATE TABLE IF NOT EXISTS approvals (
     request_id TEXT PRIMARY KEY,
     task_id TEXT, workflow_id TEXT, tool_name TEXT, agent_role TEXT,
-    args TEXT, risk TEXT, status TEXT, created_at TEXT, resolved_at TEXT, resolver TEXT
+    args TEXT, risk TEXT, status TEXT, created_at TEXT, resolved_at TEXT, resolver TEXT,
+    rejection_reason TEXT
+)
+"""
+
+_DDL_IDEMPOTENCY = """
+CREATE TABLE IF NOT EXISTS approval_idempotency_keys (
+    idempotency_key TEXT PRIMARY KEY,
+    request_id TEXT,
+    created_at TEXT
 )
 """
 
@@ -43,7 +52,7 @@ class ApprovalStore:
 
     def _init(self) -> None:
         con = sqlite3.connect(self.db_path)
-        con.executescript(_DDL)
+        con.executescript(_DDL + ";" + _DDL_IDEMPOTENCY)
         con.commit()
         con.close()
 
@@ -87,6 +96,24 @@ class ApprovalStore:
         rows = self._exec("SELECT * FROM approvals WHERE status='PENDING' ORDER BY created_at LIMIT ?",
                           (limit,), fetch="all") or []
         return [dict(r) for r in rows]
+
+    # ---- idempotency methods ----
+    def store_idempotency_key(self, key: str, request_id: str) -> bool:
+        """Record a processed idempotency key. Returns True if newly stored."""
+        try:
+            self._exec(
+                "INSERT INTO approval_idempotency_keys (idempotency_key, request_id, created_at) VALUES (?,?,?)",
+                (key, request_id, datetime.now(timezone.utc).isoformat()),
+            )
+            return True
+        except Exception:
+            return False
+
+    def check_idempotency_key(self, key: str) -> str | None:
+        """Check if an idempotency key was already processed. Returns request_id if found."""
+        row = self._exec("SELECT request_id FROM approval_idempotency_keys WHERE idempotency_key=?",
+                         (key,), fetch="one")
+        return row["request_id"] if row else None
 
 
 class HumanInTheLoop:

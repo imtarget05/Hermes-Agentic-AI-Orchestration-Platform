@@ -18,6 +18,15 @@ from dataclasses import dataclass, field
 
 from ..tools import ToolExecutor
 
+# Grounded-price policy (incident: invented market prices).
+# Every agent reporting figures must use ONLY tool/RAG-provided numbers and
+# must never invent prices, specs or model details from memory.
+_GROUNDING = (
+    " Grounding rule: use ONLY figures from tool outputs / retrieved evidence; "
+    "never invent prices, specs or model details. Every figure must be traceable "
+    "to a quote evidence_ref, and quotes carry quote_date (or DEMO for samples)."
+)
+
 
 @dataclass
 class BaseAgent:
@@ -58,7 +67,7 @@ PRICE = BaseAgent(
     system_prompt=(
         "You are Price agent. Compare vendor quotes by total cost "
         "(unit_price x quantity). Use compare_prices / parse_quote_pdf only. "
-        "Output a price ranking with the lowest vendor first."
+        "Output a price ranking with the lowest vendor first." + _GROUNDING
     ),
     allowed_permissions={"general", "procurement_price"},
 )
@@ -67,6 +76,7 @@ VENDOR = BaseAgent(
     system_prompt=(
         "You are Vendor agent. Check each vendor against the approved-vendor "
         "list via check_approved_vendor only. Output approved/not-approved per vendor."
+        + _GROUNDING
     ),
     allowed_permissions={"general", "procurement_vendor"},
 )
@@ -74,7 +84,7 @@ CONTRACT = BaseAgent(
     name="contract", role="Contract",
     system_prompt=(
         "You are Contract agent. Extract payment terms, warranty years and SLA "
-        "hours via extract_contract_terms only. Output per-vendor terms."
+        "hours via extract_contract_terms only. Output per-vendor terms." + _GROUNDING
     ),
     allowed_permissions={"general", "procurement_contract"},
 )
@@ -82,14 +92,34 @@ SPEC = BaseAgent(
     name="spec", role="Specification",
     system_prompt=(
         "You are Specification agent. Score each quote against the required spec "
-        "via score_spec only. Output per-vendor score and meets_minimum."
+        "via score_spec only. Output per-vendor score and meets_minimum." + _GROUNDING
     ),
     allowed_permissions={"general", "procurement_spec"},
 )
 
 
+def _looks_like_price(claim: str) -> bool:
+    """True if a claim states a monetary figure ($, VND, ₫, total cost)."""
+    import re as _re
+    t = claim or ""
+    return bool(_re.search(r"\$|₫|vnd|total cost|giá", t, _re.IGNORECASE))
+
+
+def _quotes_as_of(quotes: list[dict]) -> str:
+    """Freshness label for a recommendation: DEMO | ISO date | date range | ''."""
+    if not quotes:
+        return ""
+    if all(q.get("is_demo") or q.get("quote_date") == "DEMO" for q in quotes):
+        return "DEMO"
+    dates = sorted({str(q.get("quote_date", "")).strip() for q in quotes
+                    if str(q.get("quote_date", "")).strip() and q.get("quote_date") != "DEMO"})
+    if not dates:
+        return ""
+    return dates[0] if len(dates) == 1 else f"{dates[0]}..{dates[-1]}"
+
+
 class AnalysisAgent(BaseAgent):
-    """Join node: lowest total + approved + warranty/SLA → Recommendation JSON."""
+    """Join node: deterministic policy engine → Recommendation JSON."""
 
     def think(self, task_text: str, context: str = "") -> str:
         if self.llm:
@@ -97,34 +127,56 @@ class AnalysisAgent(BaseAgent):
         return self._deterministic(task_text, context)
 
     def _deterministic(self, task_text: str, context: str) -> str:
+        # Lazy import to avoid circular dependency
+        from ..decision import PolicyEngine
+        from ..procurement.schemas import (
+            ContractTerms,
+            Quote,
+            SpecScore,
+            VendorStatus,
+        )
+
+        policy_engine = PolicyEngine.load_policy("src/hermes/config/policy.yaml")
+
         quotes = self._quotes_from_ctx(context)
         approved = self._approved_from_ctx(context)
         terms = self._terms_from_ctx(context)
-        # eligible = approved vendors only; fallback to all if none marked
-        eligible = [q for q in quotes if approved.get(q.get("vendor", ""), True)]
-        pool = eligible or quotes
-        if not pool:
-            return json.dumps({"vendor": "", "total_cost": 0.0, "reasons": [],
-                               "evidence_refs": [], "status": "DRAFT"})
-        best = min(pool, key=lambda q: float(q.get("total", 0) or 0))
-        vendor = best.get("vendor", "")
-        total = float(best.get("total", 0) or 0)
-        t = terms.get(vendor, {})
-        reasons = [
-            {"claim": f"lowest total cost ${total:,.0f}", "evidence_ref": best.get("source_uri", "quotes")},
-            {"claim": "approved vendor", "evidence_ref": f"vendors.json:{vendor}"},
-        ]
-        if t.get("warranty_years"):
-            reasons.append({"claim": f"{t['warranty_years']:g}-year warranty",
-                            "evidence_ref": t.get("source_uri", "quotes") or "quotes"})
-        if t.get("payment"):
-            reasons.append({"claim": f"payment {t['payment']}", "evidence_ref": t.get("source_uri", "quotes") or "quotes"})
-        if t.get("sla_hours"):
-            reasons.append({"claim": f"SLA {t['sla_hours']:g} hours",
-                            "evidence_ref": t.get("source_uri", "quotes") or "quotes"})
-        rec = {"vendor": vendor, "total_cost": total, "reasons": reasons,
-               "evidence_refs": [r["evidence_ref"] for r in reasons], "status": "PENDING_APPROVAL"}
-        return json.dumps(rec)
+        spec_scores = self._spec_scores_from_ctx(context)
+
+        # Derive contract terms from the quote evidence when the contract agent
+        # did not supply them. The quotes' raw_text IS part of the evidence —
+        # letting a missing structured field fall back to warranty=0 / payment=""
+        # would disqualify every vendor for terms that are actually present in
+        # the source document (information-preservation, not policy weakening).
+        if quotes:
+            ex = self.executor()
+            for q in quotes:
+                vendor = str(q.get("vendor", ""))
+                raw = str(q.get("raw_text", "") or "")
+                if not vendor or vendor in terms or not raw.strip():
+                    continue
+                try:
+                    terms[vendor] = json.loads(ex.call(
+                        "extract_contract_terms", quote_text=raw, vendor=vendor,
+                        source_uri=str(q.get("source_uri", ""))))
+                except Exception:
+                    pass
+
+        # Build domain objects
+        quote_objs = [Quote(**q) for q in quotes]
+        vendor_statuses = {
+            v: VendorStatus(vendor=v, approved=approved.get(v, True))
+            for v in approved
+        }
+        contract_terms = {v: ContractTerms(**t) for v, t in terms.items()}
+        spec_score_objs = {v: SpecScore(**s) for v, s in spec_scores.items()}
+
+        # Evaluate via policy engine
+        rec = policy_engine.evaluate(
+            quote_objs, vendor_statuses, contract_terms, spec_score_objs
+        )
+
+        return rec.model_dump_json()
 
     @staticmethod
     def _json_objects(ctx: str, max_window: int = 6000) -> list[dict]:
@@ -176,6 +228,14 @@ class AnalysisAgent(BaseAgent):
                 out[str(o["vendor"])] = o
         return out
 
+    @staticmethod
+    def _spec_scores_from_ctx(ctx: str) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for o in AnalysisAgent._json_objects(ctx):
+            if o.get("vendor") and "score" in o and "meets_minimum" in o:
+                out[str(o["vendor"])] = o
+        return out
+
 
 class VerificationAgent(BaseAgent):
     """Check the recommendation is grounded in evidence (fail → retry)."""
@@ -193,6 +253,8 @@ class VerificationAgent(BaseAgent):
         for r in rec.reasons:
             if not r.evidence_ref:
                 problems.append(f"claim without evidence: {r.claim[:80]}")
+            elif _looks_like_price(r.claim) and r.evidence_ref.strip().lower() in ("quotes", ""):
+                problems.append(f"price claim without dated quote evidence: {r.claim[:80]}")
         if not rec.evidence_refs:
             problems.append("no evidence_refs")
         if problems:
@@ -224,16 +286,22 @@ ANALYSIS = AnalysisAgent(
         "You are Analysis agent. Aggregate price/vendor/contract/spec outputs. "
         "Recommend the lowest-cost APPROVED vendor with acceptable warranty/SLA. "
         "Reply ONLY with Recommendation JSON: "
-        '{"vendor, total_cost, reasons:[{claim, evidence_ref}], evidence_refs, status}.'
+        '{"vendor, total_cost, reasons:[{claim, evidence_ref}], evidence_refs, status, data_as_of}.'
+        " Set data_as_of from the quotes' quote_date (or DEMO for samples)."
+        + _GROUNDING
     ),
-    allowed_permissions={"general"},
+    # procurement_contract: the join node may derive contract terms from the
+    # quotes' raw_text evidence when the contract agent supplied none.
+    allowed_permissions={"general", "procurement_contract"},
 )
 VERIFICATION = VerificationAgent(
     name="verification", role="Verification",
     system_prompt=(
         "You are Verification agent. Check the recommendation is grounded in "
         "evidence: every reason must cite an evidence_ref (quote URI / vendors.json). "
+        "Price figures must cite a dated quote (quote_date, never DEMO-as-market). "
         "Reply VERIFICATION PASSED + summary, or VERIFICATION FAILED + problems."
+        + _GROUNDING
     ),
     allowed_permissions={"general"},
 )

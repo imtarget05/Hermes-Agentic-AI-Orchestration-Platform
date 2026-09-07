@@ -176,6 +176,55 @@ def _wave_dict(w: WaveResult, baseline: WaveResult | None):
     return d
 
 
+def run_agent_worker_matrix(
+    agent_counts=(1, 2, 4, 8),
+    worker_counts=(1, 2, 4, 8),
+    unit_work_seconds: float = 0.05,
+    store_dir: str = "/tmp/hermes-lt-agents",
+    handler: Callable[[Task], str] | None = None,
+) -> dict:
+    """HERMES-02: fan-out benchmark — agents (1/2/4/8) × workers (1/2/4/8).
+
+    Each cell runs `agents` parallel fan-out tasks on `workers` worker threads
+    and records throughput, p95 latency and failure rate, so the chosen
+    concurrency configuration is based on measured numbers, not guesses.
+    """
+    import os
+
+    store_dir = os.path.join(store_dir, time.strftime("run-%Y%m%d-%H%M%S"))
+    os.makedirs(store_dir, exist_ok=True)
+    if handler is None:
+        def handler(t):
+            time.sleep(unit_work_seconds)
+            return f"memory://result/{t.task_id}"
+
+    cells: list[dict] = []
+    for a in agent_counts:
+        for w in worker_counts:
+            path = os.path.join(store_dir, f"a{a}-w{w}.db")
+            wave = _run_wave(a, w, unit_work_seconds, path, handler)
+            cells.append({
+                "agents": a, "workers": w,
+                "wall_seconds": round(wave.wall_seconds, 4),
+                "throughput_tasks_per_sec": round(wave.throughput, 3),
+                "p95_latency_seconds": round(wave.p95_latency, 4),
+                "failure_rate": round(wave.failed / (wave.completed + wave.failed or 1), 4),
+                "completed": wave.completed, "failed": wave.failed,
+            })
+    return {"cells": cells, "generated": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}
+
+
+def agent_matrix_report(report: dict) -> str:
+    lines = ["Hermes — Agent×Worker fan-out benchmark (HERMES-02)", "=" * 56]
+    for c in report["cells"]:
+        lines.append(
+            f"agents={c['agents']:<2} workers={c['workers']:<2} "
+            f"wall={c['wall_seconds']:>8.4f}s  throughput={c['throughput_tasks_per_sec']:>8.3f}/s  "
+            f"p95={c['p95_latency_seconds']:>7.4f}s  failure={c['failure_rate']}"
+        )
+    return "\n".join(lines)
+
+
 def load_test_report(report: dict) -> str:
     lines = ["Hermes — Load test report", "=" * 48]
     for w in report["waves"]:

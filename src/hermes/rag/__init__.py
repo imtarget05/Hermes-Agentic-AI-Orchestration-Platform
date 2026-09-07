@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..ingestion import IngestionDiagnostics, IngestionPipeline, RawSource
+
 _TOKEN = re.compile(r"[a-z0-9]+(?:\.[a-z0-9]+)?")
 
 
@@ -35,10 +37,27 @@ class Chunk:
     source_uri: str
     text: str
     tokens: list[str] = field(default_factory=list)
+    source_type: str = ""
+    task_id: str = ""
+    scraped_at: str = ""
+    ttl_days: int = 30
 
     def __post_init__(self) -> None:
         if not self.tokens:
             self.tokens = tokenize(self.text)
+
+    def age_days(self) -> int:
+        if not self.scraped_at:
+            return 9999
+        try:
+            from datetime import UTC, datetime
+            dt = datetime.fromisoformat(self.scraped_at)
+            return (datetime.now(UTC) - dt).days
+        except Exception:
+            return 9999
+
+    def is_stale(self) -> bool:
+        return self.age_days() > self.ttl_days
 
 
 @dataclass
@@ -56,8 +75,11 @@ class RagIndex:
         self.embed = embed
         self._vectors: list[list[float]] = []
 
-    def add(self, doc_id: str, source_uri: str, text: str) -> None:
-        self.chunks.append(Chunk(doc_id, source_uri, text))
+    def add(self, doc_id: str, source_uri: str, text: str,
+            source_type: str = "", task_id: str = "",
+            scraped_at: str = "", ttl_days: int = 30) -> None:
+        self.chunks.append(Chunk(doc_id, source_uri, text, source_type=source_type,
+                                 task_id=task_id, scraped_at=scraped_at, ttl_days=ttl_days))
 
     def __len__(self) -> int:
         return len(self.chunks)
@@ -111,8 +133,11 @@ class RagIndex:
 
     # ---- persistence ---- #
     def to_dict(self) -> dict[str, Any]:
-        return {"chunks": [{"doc_id": c.doc_id, "source_uri": c.source_uri,
-                            "text": c.text} for c in self.chunks]}
+        return {"chunks": [{
+            "doc_id": c.doc_id, "source_uri": c.source_uri, "text": c.text,
+            "tokens": c.tokens, "source_type": c.source_type, "task_id": c.task_id,
+            "scraped_at": c.scraped_at, "ttl_days": c.ttl_days,
+        } for c in self.chunks]}
 
     def save(self, path: str) -> str:
         p = Path(path)
@@ -126,21 +151,61 @@ class RagIndex:
         try:
             data = json.loads(Path(path).read_text())
             for c in data.get("chunks", []):
-                idx.add(str(c.get("doc_id", "")), str(c.get("source_uri", "")),
-                        str(c.get("text", "")))
+                idx.add(
+                    str(c.get("doc_id", "")),
+                    str(c.get("source_uri", "")),
+                    str(c.get("text", "")),
+                    source_type=str(c.get("source_type", "")),
+                    task_id=str(c.get("task_id", "")),
+                    scraped_at=str(c.get("scraped_at", "")),
+                    ttl_days=int(c.get("ttl_days", 30)),
+                )
         except Exception:
             pass
         return idx
 
+    def find_by_source(self, source_uri: str) -> list[Chunk]:
+        return [c for c in self.chunks if c.source_uri == source_uri]
 
-def ingest_quotes(index: RagIndex, quotes: list[dict[str, Any]]) -> RagIndex:
+    def find_by_task(self, task_id: str) -> list[Chunk]:
+        return [c for c in self.chunks if c.task_id == task_id]
+
+    def evict_stale(self, ttl_days: int = 30) -> list[Chunk]:
+        stale = [c for c in self.chunks if c.is_stale() or c.ttl_days > 0 and c.age_days() > ttl_days]
+        self.chunks = [c for c in self.chunks if not c.is_stale() and not (c.ttl_days > 0 and c.age_days() > ttl_days)]
+        return stale
+
+
+def ingest_quotes(index: RagIndex, quotes: list[dict[str, Any]],
+                  pipeline: IngestionPipeline | None = None,
+                  diagnostics: list[IngestionDiagnostics] | None = None) -> RagIndex:
+    """Ingest quote dicts into the corpus, preserving *all* extracted fields.
+
+    Previously this collapsed each quote to ``unit price / quantity / total``
+    plus a canned ``raw_text`` substring, silently dropping structured trust
+    fields (currency, incoterms, legal entity, valid-until, status, ...).
+    Now every quote is routed through the canonical ingestion pipeline, so all
+    structured content is preserved (normalized + deduplicated + validated)
+    before chunking — fixing the whole failure class, not one instance.
+    """
+    pipe = pipeline or IngestionPipeline()
     for q in quotes:
         vendor = str(q.get("vendor", "unknown"))
-        body = q.get("raw_text", "") or json.dumps(q)
-        text = (f"unit price ${q.get('unit_price', 0)} quantity {q.get('quantity', 0)} "
-                f"total ${q.get('total', 0)}. {body}")
-        index.add(f"quote-{vendor.lower()}", str(q.get("source_uri", "")),
-                  f"Vendor quote {vendor}: {text}")
+        doc_id = f"quote-{vendor.lower()}"
+        source_uri = str(q.get("source_uri", "") or doc_id)
+        raw = RawSource(
+            source_uri=source_uri,
+            doc_id=doc_id,
+            kind="dict" if isinstance(q, dict) else "text",
+            payload=q if isinstance(q, dict) else {},
+            text=str(q.get("raw_text", "")) if isinstance(q, dict) else str(q or ""),
+            metadata={},
+        )
+        proc = pipe.process(raw)
+        text = proc.indexed_text() or str(q.get("raw_text", ""))
+        index.add(doc_id, source_uri, text)
+        if diagnostics is not None:
+            diagnostics.append(proc.diagnostics)
     return index
 
 
@@ -160,9 +225,10 @@ def ingest_vendors(index: RagIndex, vendors_path: str = "") -> RagIndex:
 
 
 def build_case_index(quotes: list[dict[str, Any]], required_spec: str = "",
-                     vendors_path: str = "") -> RagIndex:
+                     vendors_path: str = "", pipeline: IngestionPipeline | None = None,
+                     diagnostics: list[IngestionDiagnostics] | None = None) -> RagIndex:
     index = RagIndex()
-    ingest_quotes(index, quotes)
+    ingest_quotes(index, quotes, pipeline=pipeline, diagnostics=diagnostics)
     ingest_vendors(index, vendors_path)
     if required_spec:
         index.add("required-spec", "request",

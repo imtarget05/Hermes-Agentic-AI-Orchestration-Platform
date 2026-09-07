@@ -71,7 +71,7 @@ def test_worker_retries_retryable_failure_then_succeeds(tmp_path):
                retry_policy=RetryPolicy(max_attempts=3, schedule=(0, 0, 0)))
     w.pump_once()  # attempt 1 -> retry (requeued for immediate delivery)
     assert calls["n"] == 1
-    assert store.get_task("flaky").status == TaskStatus.RETRY
+    assert store.get_task("flaky").status == TaskStatus.RETRYING
     assert len(events.of(EVENT_RETRIED)) == 1
 
     w.pump_once()  # attempt 2 -> success

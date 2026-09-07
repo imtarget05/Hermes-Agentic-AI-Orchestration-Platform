@@ -1,0 +1,38 @@
+decision_policy:
+  version: "1.0"
+  weights:
+    price: 0.40
+    warranty_years: 0.20
+    sla_hours: 0.15
+    vendor_score: 0.15
+    payment_terms: 0.10
+  constraints:
+    min_warranty_years: 3
+    max_sla_hours: 4
+    required_payment_terms:
+      - "Net 30"
+      - "Net 45"
+    min_vendor_score: 70
+  vendor_tiers:
+    TIER_1:
+      - "Dell"
+      - "Lenovo"
+      - "HP"
+    TIER_2: []
+  vendor_tier_bonus:
+    TIER_1: 0.05
+    TIER_2: 0.0
+  disqualifiers:
+    - field: "warranty_years"
+      operator: "lt"
+      value: 3
+    - field: "sla_hours"
+      operator: "gt"
+      value: 8
+scraper:
+  rate_limit_per_domain: 2
+  ttl_days: 30
+  allowed_domains: []
+  blocked_domains: []
+  max_concurrent: 5
+  dedup_by: content_hash

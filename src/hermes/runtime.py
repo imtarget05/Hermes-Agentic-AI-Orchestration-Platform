@@ -90,16 +90,20 @@ class HermesRuntime:
 
 
 def default_demo_quotes() -> list[dict]:
-    """Fallback demo quotes (Dell/Lenovo/HP) when no PDF is uploaded."""
+    """Fallback DEMO quotes (Dell/Lenovo/HP) when no PDF is uploaded.
+
+    Grounded-price policy: clearly labeled sample data, NOT market prices.
+    quote_date="DEMO" so verification + UI always show the DEMO label.
+    """
     return [
         {"vendor": "Dell", "unit_price": 1200, "quantity": 50, "total": 60000,
-         "source_uri": "demo/dell.pdf",
+         "source_uri": "demo/dell.pdf", "quote_date": "DEMO", "is_demo": True,
          "raw_text": "Dell quote $1200 x 50 laptops. Payment Net 30, 3 years warranty, SLA 4 hours."},
         {"vendor": "Lenovo", "unit_price": 1080, "quantity": 50, "total": 54000,
-         "source_uri": "demo/lenovo.pdf",
+         "source_uri": "demo/lenovo.pdf", "quote_date": "DEMO", "is_demo": True,
          "raw_text": "Lenovo quote $1080 x 50 laptops. Payment Net 30, 3 years warranty, SLA 4 hours."},
         {"vendor": "HP", "unit_price": 1150, "quantity": 50, "total": 57500,
-         "source_uri": "demo/hp.pdf",
+         "source_uri": "demo/hp.pdf", "quote_date": "DEMO", "is_demo": True,
          "raw_text": "HP quote $1150 x 50 laptops. Payment Net 45, 2 years warranty, SLA 8 hours."},
     ]
 

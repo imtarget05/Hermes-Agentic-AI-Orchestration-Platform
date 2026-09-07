@@ -1,4 +1,4 @@
-"""Hermes 8-loop agentic architecture (see README_P1.md §Architecture).
+"""Hermes 8-loop agentic architecture (see README.md § Async Task Queue Engine).
 
 1 Context → 2 Planning → 3 Dispatch (RabbitMQ) → 4 Execute → 5 Verify
 → 6 Reliability → 7 Evaluate → 8 Learn/Audit (feedback into 1 & 2)

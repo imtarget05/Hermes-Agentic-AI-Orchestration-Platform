@@ -11,7 +11,7 @@ A synchronous engine (thread-pool workers) over a pluggable message bus
 - Kafka lifecycle events (off the critical path) + Prometheus metrics
 - load-test harness producing throughput / p95 / parallel-speedup numbers
 
-Usage (see README_P1.md): pick a bus, a store, register task handlers,
+Usage (see README.md § Async Task Queue Engine): pick a bus, a store, register task handlers,
 start workers, then submit workflows through the AsyncOrchestrator.
 """
 from __future__ import annotations

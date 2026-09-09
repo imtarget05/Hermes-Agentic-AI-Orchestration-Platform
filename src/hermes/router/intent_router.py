@@ -13,7 +13,13 @@ import re
 from typing import Any
 
 from .routing_plan import (
+    AGENT_ADVISOR,
+    AGENT_BRAIN_ANSWER,
+    AGENT_COMPETITOR_ANALYZE,
+    AGENT_COMPETITOR_COLLECT,
     AGENT_CONTRACT,
+    AGENT_KB_ANSWER,
+    AGENT_OPS_AGGREGATOR,
     COMPARE_AGENTS,
     FULL_PROCUREMENT_AGENTS,
     SIMPLE_AGENTS,
@@ -103,6 +109,79 @@ _PRICE_QMARK = (
     "mới nhất", "moi nhat", "cập nhật", "cap nhat",
     "update", "giá thị trường", "gia thi truong",
 )
+
+
+# Advisor / knowledge / ops / competitor / second-brain keywords
+_ADVISOR_KW = (
+    "cố vấn", "co van", "tư vấn", "tu van", "advisor", "persona", "hội đồng",
+    "hoi dong", "oàn làm", "khuyên", "council", "nên làm gì", "nen lam gi",
+)
+_OPS_STATUS_KW = ("ops", "cần chú ý", "can chu y", "attention", "hôm nay", "hom nay",
+                  "today", "overview", "tổng quan", "tong quan", "cần xử lý", "can xu ly")
+_OPS_CONNECT_KW = ("kết nối nguồn", "ket noi", "connect", "add source", "thêm nguồn",
+                   "them nguon", "crm source", "invoice source", "calendar source")
+_COMPETITOR_BRIEF_KW = (
+    "đối thủ", "doi thủ", "competitor", "cạnh tranh", "canh tranh", "weekly brief",
+    "brief đối thủ", "quét đối thủ", "theo dõi tin tức", "market watch", "tình hình thị trường",
+)
+_COMPETITOR_WATCH_KW = ("theo dõi", "theo doi", "watch", "giám sát", "giam sat", "monitor")
+_KB_QUERY_KW = (
+    "knowledge base", "kb", "quy trình", "quy trinh", "process", "sop", "playbook",
+    "cách làm", "cach lam", "how to", "benchmark", "knowledge",
+)
+_KB_INGEST_KW = ("lưu vào", "luu vao", "add note", "ghi chú team", "ghi chu team",
+                 "save this", "note this", "lưu quy trình", "luu task")
+_BRAIN_QUERY_KW = (
+    "của tôi", "cua toi", "my ", "second brain", "bộ nhớ cá nhân", "bo nho ca nhan",
+    "hồ sơ cá nhân", "ho so ca nhan", "giấy tờ", "cong dân",
+)
+_BRAIN_INGEST_KW = ("lưu tài liệu của tôi", "luu tai lieu", "lưu ảnh", "lưu hình",
+                    "memory note", "lưu vào cá nhân", "luu ca nhan")
+
+
+def _is_advisor(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in _ADVISOR_KW)
+
+
+def _is_ops_status(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in _OPS_STATUS_KW)
+
+
+def _is_ops_connect(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in _OPS_CONNECT_KW)
+
+
+def _is_competitor_brief(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in _COMPETITOR_BRIEF_KW)
+
+
+def _is_competitor_watch(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in _COMPETITOR_WATCH_KW)
+
+
+def _is_kb_query(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in _KB_QUERY_KW)
+
+
+def _is_kb_ingest(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in _KB_INGEST_KW)
+
+
+def _is_brain_query(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in _BRAIN_QUERY_KW)
+
+
+def _is_brain_ingest(text: str) -> bool:
+    low = text.lower()
+    return any(k in low for k in _BRAIN_INGEST_KW)
 
 
 def _count_quotes(text: str, quotes: list[dict[str, Any]] | None = None) -> int:
@@ -241,6 +320,26 @@ def classify_intent(
     if any(kw in low for kw in _FULL_PROCURE_KW):
         return Intent.PROCUREMENT_DECISION
 
+    # ---- New domains: advisor / ops / knowledge / second brain / competitor ----
+    if _is_advisor(t):
+        return Intent.ASK_ADVISOR
+    if _is_ops_status(t):
+        return Intent.OPS_STATUS
+    if _is_ops_connect(t):
+        return Intent.OPS_CONNECT
+    if _is_competitor_watch(t) or _is_competitor_brief(t):
+        if _is_competitor_watch(t) and _is_competitor_brief(t):
+            return Intent.COMPETITOR_BRIEF
+        return Intent.COMPETITOR_WATCH if _is_competitor_watch(t) else Intent.COMPETITOR_BRIEF
+    if _is_brain_ingest(t):
+        return Intent.BRAIN_INGEST
+    if _is_brain_query(t):
+        return Intent.BRAIN_QUERY
+    if _is_kb_ingest(t):
+        return Intent.KB_INGEST
+    if _is_kb_query(t):
+        return Intent.KB_QUERY
+
     # Session carry-over
     if session_state in ("awaiting_approval", "running"):
         return Intent.CHITCHAT
@@ -267,6 +366,8 @@ def build_routing_plan(
                 required_agents=agents,
                 estimated_complexity=Complexity.LOW,
                 estimated_latency_ms=2000,
+                estimated_tokens=1000,
+                time_budget_seconds=30.0,
                 quote_count=quote_count,
                 has_spec_details=has_spec,
                 reasoning="; ".join(reasoning_parts),
@@ -277,6 +378,8 @@ def build_routing_plan(
             required_agents=[AGENT_CONTRACT],
             estimated_complexity=Complexity.LOW,
             estimated_latency_ms=2000,
+            estimated_tokens=1000,
+            time_budget_seconds=30.0,
             quote_count=quote_count,
             has_spec_details=has_spec,
             reasoning="simple_task:default_contract",
@@ -289,6 +392,8 @@ def build_routing_plan(
             required_agents=COMPARE_AGENTS,
             estimated_complexity=Complexity.MEDIUM,
             estimated_latency_ms=8000,
+            estimated_tokens=3000,
+            time_budget_seconds=60.0,
             quote_count=quote_count,
             has_spec_details=has_spec,
             reasoning="; ".join(reasoning_parts),
@@ -301,9 +406,38 @@ def build_routing_plan(
             required_agents=FULL_PROCUREMENT_AGENTS,
             estimated_complexity=Complexity.HIGH,
             estimated_latency_ms=30000,
+            estimated_tokens=8000,
+            time_budget_seconds=180.0,
             quote_count=quote_count,
             has_spec_details=has_spec,
             reasoning="; ".join(reasoning_parts),
+        )
+
+    # New-domain intents: assign their service agents
+    _DOMAIN_AGENTS = {
+        Intent.ASK_ADVISOR: [AGENT_ADVISOR],
+        Intent.OPS_STATUS: [AGENT_OPS_AGGREGATOR],
+        Intent.OPS_CONNECT: [AGENT_OPS_AGGREGATOR],
+        Intent.COMPETITOR_BRIEF: [AGENT_COMPETITOR_COLLECT, AGENT_COMPETITOR_ANALYZE],
+        Intent.COMPETITOR_WATCH: [AGENT_COMPETITOR_COLLECT],
+        Intent.KB_QUERY: [AGENT_KB_ANSWER],
+        Intent.KB_INGEST: [AGENT_KB_ANSWER],
+        Intent.BRAIN_QUERY: [AGENT_BRAIN_ANSWER],
+        Intent.BRAIN_INGEST: [AGENT_BRAIN_ANSWER],
+    }
+    if intent in _DOMAIN_AGENTS:
+        return RoutingPlan(
+            intent=intent,
+            required_agents=_DOMAIN_AGENTS[intent],
+            estimated_complexity=(Complexity.MEDIUM
+                                  if intent in (Intent.COMPETITOR_BRIEF,)
+                                  else Complexity.LOW),
+            estimated_latency_ms=3000,
+            estimated_tokens=1500,
+            time_budget_seconds=45.0,
+            quote_count=quote_count,
+            has_spec_details=has_spec,
+            reasoning=f"intent:{intent.value}:domain",
         )
 
     # Non-procurement intents: no agents needed
@@ -312,6 +446,8 @@ def build_routing_plan(
         required_agents=[],
         estimated_complexity=Complexity.LOW,
         estimated_latency_ms=500,
+        estimated_tokens=500,
+        time_budget_seconds=10.0,
         quote_count=quote_count,
         has_spec_details=has_spec,
         reasoning=f"intent:{intent.value}",

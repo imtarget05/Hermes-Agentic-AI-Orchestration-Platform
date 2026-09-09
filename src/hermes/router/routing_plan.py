@@ -19,6 +19,15 @@ class Intent(str, Enum):
     PRICE_QUESTION = "price_question"
     INBOX = "inbox"
     APPROVAL = "approval"
+    ASK_ADVISOR = "ask_advisor"
+    OPS_STATUS = "ops_status"
+    OPS_CONNECT = "ops_connect"
+    COMPETITOR_BRIEF = "competitor_brief"
+    COMPETITOR_WATCH = "competitor_watch"
+    KB_QUERY = "kb_query"
+    KB_INGEST = "kb_ingest"
+    BRAIN_QUERY = "brain_query"
+    BRAIN_INGEST = "brain_ingest"
     CHITCHAT = "chitchat"
 
 
@@ -35,6 +44,8 @@ class RoutingPlan(BaseModel):
     required_agents: list[str] = Field(default_factory=list)
     estimated_complexity: Complexity = Complexity.LOW
     estimated_latency_ms: int = 0
+    estimated_tokens: int = 0
+    time_budget_seconds: float = 0.0
     quote_count: int = 0
     has_spec_details: bool = False
     reasoning: str = ""
@@ -50,6 +61,14 @@ AGENT_CONTRACT = "contract"
 AGENT_SPEC = "spec"
 AGENT_ANALYSIS = "analysis"
 AGENT_VERIFICATION = "verification"
+
+# New-domain agents (non-procurement)
+AGENT_ADVISOR = "advisor"
+AGENT_OPS_AGGREGATOR = "ops_aggregator"
+AGENT_COMPETITOR_COLLECT = "competitor_collect"
+AGENT_COMPETITOR_ANALYZE = "competitor_analyze"
+AGENT_KB_ANSWER = "kb_answer"
+AGENT_BRAIN_ANSWER = "brain_answer"
 
 # Full procurement DAG (6 agents in topological order)
 FULL_PROCUREMENT_AGENTS = [

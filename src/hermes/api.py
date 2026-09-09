@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .auth import ApprovalPolicy, RBACEngine, User
-from .runtime import HermesRuntime
+from .runtime import HermesRuntime, get_runtime
 
 app = FastAPI(title="Hermes Procurement API")
 
@@ -34,7 +34,6 @@ app.add_middleware(
 )
 
 API_TOKEN = os.environ.get("HERMES_API_TOKEN", "")
-_runtime: HermesRuntime | None = None
 _rbac_engine: RBACEngine | None = None
 
 
@@ -96,10 +95,7 @@ def _get_user_from_request(request: Request, x_api_token: str | None) -> User | 
 
 
 def runtime() -> HermesRuntime:
-    global _runtime
-    if _runtime is None:
-        _runtime = HermesRuntime()
-    return _runtime
+    return get_runtime()
 
 
 def _check_auth(x_api_token: str | None) -> None:
@@ -316,3 +312,138 @@ def get_policy(tenant_id: str, x_api_token: str | None = Header(default=None)):
     engine = _get_rbac_engine()
     policy = engine.get_or_create_default_policy(tenant_id)
     return policy.to_dict()
+
+
+# ---- Phase 1-4 domain endpoints (knowledge / advisor / ops / competitor) ----
+
+class KnowledgeIngest(BaseModel):
+    title: str = ""
+    content: str
+    scope: str = "team"          # team | personal
+    category: str = "other"
+    source_uri: str = ""
+
+
+class AdvisorAsk(BaseModel):
+    question: str
+    personas: list[str] = Field(default_factory=list)
+    context: str = ""
+
+
+class OpsSourceAdd(BaseModel):
+    kind: str = "crm"            # crm | invoicing | calendar | inbox | custom
+    name: str = ""
+    enabled: bool = True
+
+
+class CompetitorWatch(BaseModel):
+    competitor: str
+    urls: list[str] = Field(default_factory=list)
+    feeds: list[str] = Field(default_factory=list)
+
+
+def _svc():
+    return runtime().services()
+
+
+@app.post("/knowledge/ingest")
+def knowledge_ingest(req: KnowledgeIngest, request: Request = None,
+                     x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    user = _get_user_from_request(request, x_api_token)
+    user_id = user.id if user else ""
+    if req.scope not in ("team", "personal"):
+        raise HTTPException(422, "scope must be team|personal")
+    if req.scope == "personal" and not user_id:
+        raise HTTPException(422, "personal scope requires X-User-ID")
+    doc_id = _svc()["knowledge"].ingest(
+        content=req.content, title=req.title, scope=req.scope,
+        tenant_id=_extract_tenant_context(request, x_api_token),
+        user_id=user_id, category=req.category, source_uri=req.source_uri)
+    return {"doc_id": doc_id, "scope": req.scope}
+
+
+@app.get("/knowledge/query")
+def knowledge_query(q: str, scope: str = "team", request: Request = None,
+                    x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    user = _get_user_from_request(request, x_api_token)
+    if scope not in ("team", "personal"):
+        raise HTTPException(422, "scope must be team|personal")
+    ans = _svc()["knowledge"].query(
+        text=q, scope=scope, tenant_id=_extract_tenant_context(request, x_api_token),
+        user_id=user.id if user else "")
+    return ans.model_dump()
+
+
+@app.post("/advisor/ask")
+def advisor_ask(req: AdvisorAsk, x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    report = _svc()["council"].ask(req.question, req.personas or None, req.context)
+    return report.model_dump()
+
+
+@app.get("/ops/sources")
+def ops_sources(request: Request = None, x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    return {"sources": _svc()["ops"].sources_json(
+        _extract_tenant_context(request, x_api_token))}
+
+
+@app.post("/ops/sources")
+def ops_add_source(req: OpsSourceAdd, request: Request = None,
+                   x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    src = _svc()["ops"].add_source(
+        kind=req.kind, tenant_id=_extract_tenant_context(request, x_api_token),
+        name=req.name, enabled=req.enabled)
+    return src.model_dump()
+
+
+@app.delete("/ops/sources/{source_id}")
+def ops_remove_source(source_id: str, x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    ok = _svc()["ops"].remove_source(source_id)
+    if not ok:
+        raise HTTPException(404, "source not found")
+    return {"removed": source_id}
+
+
+@app.get("/ops/attention")
+def ops_attention(request: Request = None, x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    rep = _svc()["ops"].collect_attention(_extract_tenant_context(request, x_api_token))
+    return rep.model_dump()
+
+
+@app.post("/competitor/watch")
+def competitor_watch(req: CompetitorWatch, x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    from .competitor import CompetitorTarget
+    target = CompetitorTarget(competitor=req.competitor, urls=req.urls, feeds=req.feeds)
+    _svc()["competitor_targets"].append(target)
+    return {"watching": req.competitor, "targets": len(_svc()["competitor_targets"])}
+
+
+@app.get("/competitor/brief")
+def competitor_brief(x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    from .competitor import build_weekly_brief
+    svc = _svc()
+    findings = svc["competitor"].collect(svc["competitor_targets"])
+    brief = build_weekly_brief(findings)
+    return brief.model_dump()
+
+
+@app.get("/harness/metrics")
+def harness_metrics(x_api_token: str | None = Header(default=None)):
+    _check_auth(x_api_token)
+    ev = _svc()["eval"]
+    metrics = [m.model_dump() for m in ev.compute_metrics()]
+    rate = 0.0
+    try:
+        from .harness.eval import lifecycle_success_rate
+        rate = lifecycle_success_rate(runtime().store)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"metrics": metrics, "lifecycle_success_rate": rate}

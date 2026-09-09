@@ -88,15 +88,42 @@ class TaskDAG:
         return not self.dependents.get(task_id)
 
 
-def build_dag(nodes: list[dict[str, Any]]) -> TaskDAG:
+def build_dag(nodes: list[dict[str, Any]], max_depth: int = 5) -> TaskDAG:
     """Build a TaskDAG from a list of node descriptors.
 
     Each node: {"task_id": str, "task": dict, "deps": [task_id, ...]}
+
+    Validates DAG depth does not exceed max_depth to prevent unbounded recursion.
     """
     dag = TaskDAG()
     for node in nodes:
         dag.add(node["task_id"], node["task"], node.get("deps"))
+    
+    # Validate DAG depth (T2.3)
+    roots = dag.roots()
+    for root in roots:
+        depth = _compute_depth(dag, root, set())
+        if depth > max_depth:
+            raise BudgetExceededError(
+                f"budget: DAG depth {depth} exceeds MAX_DAG_DEPTH={max_depth}")
+    
     return dag
+
+
+def _compute_depth(dag: TaskDAG, task_id: str, visited: set[str]) -> int:
+    """Compute max depth from a task to any leaf (recursive)."""
+    if task_id in visited:
+        return 0  # cycle-safe
+    visited.add(task_id)
+    children = dag.dependents.get(task_id, set())
+    if not children:
+        return 1
+    return 1 + max(_compute_depth(dag, child, visited) for child in children)
+
+
+class BudgetExceededError(Exception):
+    """Raised when DAG exceeds budget limits (depth, etc.)."""
+    pass
 
 
 def resolve_ready(dag: TaskDAG) -> list[dict[str, Any]]:

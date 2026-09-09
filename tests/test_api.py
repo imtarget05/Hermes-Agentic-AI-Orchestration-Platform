@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from hermes import api
 from hermes.config import settings
+from hermes.runtime import reset_runtime
 
 
 @pytest.fixture()
@@ -16,7 +17,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "llm_provider", "stub")  # deterministic tests (no live LLM)
     monkeypatch.setenv("HERMES_PROCUREMENT_DB", str(tmp_path / "p.db"))
     monkeypatch.setenv("HERMES_HITL_AUTO_APPROVE", "true")
-    api._runtime = None
+    reset_runtime()
     return TestClient(api.app)
 
 

@@ -48,6 +48,12 @@ from .metrics import (
     BaseMetrics,
     build_metrics,
 )
+from .tracing import (
+    maybe_trace_task,
+    maybe_trace_verification,
+    record_task_duration,
+    record_task_execution,
+)
 from .retry import RetryPolicy, classify_failure
 
 if TYPE_CHECKING:
@@ -193,12 +199,21 @@ class Worker:
         self.store.update_task_execution_state(task.task_id, exec_state)
 
         start = time.time()
-        # loop 6: hard deadline around handler execution
-        from .loops.reliability import run_with_timeout
+        
+        # T7.1: Trace task execution
+        with maybe_trace_task(task.task_id, task.task_type, task.workflow_id) as task_span:
+            if task_span:
+                task_span.set_attribute("worker.id", self.name)
+                task_span.set_attribute("task.attempt", task.attempt)
+            
+            # loop 6: hard deadline around handler execution
+            from .loops.reliability import run_with_timeout
 
-        result_uri = run_with_timeout(lambda: self.handler(task),
-                                      self.timeout_seconds, task.task_type)
+            result_uri = run_with_timeout(lambda: self.handler(task),
+                                          self.timeout_seconds, task.task_type)
+        
         elapsed = time.time() - start
+        record_task_duration(task.task_type, elapsed * 1000, "success")
 
         # Update execution state with partial result
         exec_state["partial_result"] = result_uri
@@ -206,9 +221,13 @@ class Worker:
         self.store.update_task_execution_state(task.task_id, exec_state)
 
         # loop 5: verification before the result is accepted
-        verdict = self.verifier.verify(task, result_uri)
-        if not verdict.passed:
-            raise VerificationError(verdict.reason, retryable=verdict.retryable)
+        with maybe_trace_verification(task.task_id, task.task_type) as verify_span:
+            verdict = self.verifier.verify(task, result_uri)
+            if verify_span:
+                verify_span.set_attribute("verification.passed", verdict.passed)
+                verify_span.set_attribute("verification.retryable", verdict.retryable)
+            if not verdict.passed:
+                raise VerificationError(verdict.reason, retryable=verdict.retryable)
         self._pending_result_uri = result_uri
         return elapsed
 
@@ -218,6 +237,8 @@ class Worker:
         self.breaker.record_success(task.task_type)  # loop 6
         self.metrics.inc(TASKS_COMPLETED, 1.0)
         self.metrics.observe(TASK_DURATION, duration)
+        record_task_execution(task.task_type, "completed")
+        record_task_duration(task.task_type, duration * 1000, "completed")
         emit_best_effort(self.events, EVENT_COMPLETED, task_id=task.task_id,
                          workflow_id=task.workflow_id, worker_id=self.name,
                          attempt=task.attempt, duration_ms=int(duration * 1000))
@@ -250,6 +271,7 @@ class Worker:
 
             self.store.mark_retried(task.task_id, new_attempt, worker_id=self.name)
             self.metrics.inc(TASKS_RETRIED, 1.0)
+            record_task_execution(task.task_type, "retried")
             emit_best_effort(self.events, EVENT_RETRIED, task_id=task.task_id, workflow_id=task.workflow_id,
                              worker_id=self.name, attempt=new_attempt, error=str(error)[:300])
             # Generate new idempotency key for retry
@@ -261,6 +283,7 @@ class Worker:
             delivery.ack()
             return
 
+        record_task_execution(task.task_type, "failed")
         self._deadletter_and_ack(delivery, task.to_message(),
                                  f"{type(error).__name__}: {error}")
         if self.on_task_failed:

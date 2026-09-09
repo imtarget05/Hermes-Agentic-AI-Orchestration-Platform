@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     hermes_database_url: str = ""  # set → Postgres backend (psycopg3), else SQLite
     hermes_routing_path: str = "./routing.json"
     hermes_sandbox_dir: str = "./sandbox"
+    hermes_knowledge_db: str = "./hermes_knowledge.db"
     max_retries: int = 3
 
     @property

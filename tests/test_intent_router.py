@@ -224,5 +224,45 @@ class TestAgentConstants:
         assert SIMPLE_AGENTS["spec_check"] == [AGENT_SPEC]
 
 
+# ---- New-domain intents (Phase 1-4) ----
+
+def test_classify_advisor():
+    plan = route("nên làm gì với dòng tiền tháng này? cố vấn ơi")
+    assert plan.intent.value == "ask_advisor"
+    assert plan.required_agents == ["advisor"]
+
+
+def test_classify_ops_status():
+    plan = route("hôm nay cần chú ý gì?")
+    assert plan.intent.value == "ops_status"
+
+
+def test_classify_ops_connect():
+    plan = route("kết nối nguồn CRM")
+    assert plan.intent.value == "ops_connect"
+
+
+def test_classify_competitor_brief():
+    plan = route("weekly brief đối thủ cạnh tranh")
+    assert plan.intent.value == "competitor_brief"
+    assert "competitor_collect" in plan.required_agents
+
+
+def test_classify_kb_query_and_ingest():
+    assert route("SOP quy trình onboarding là gì?").intent.value == "kb_query"
+    assert route("lưu vào knowledge base giúp tôi").intent.value == "kb_ingest"
+
+
+def test_classify_brain_query_and_ingest():
+    assert route("hợp đồng của tôi lưu ở đâu?").intent.value == "brain_query"
+    assert route("lưu tài liệu của tôi").intent.value == "brain_ingest"
+
+
+def test_procurement_still_wins_over_new_domains():
+    # 'mua' keywords take priority (checked before new domains)
+    plan = route("mua 50 laptop dell lenovo")
+    assert plan.intent.value == "procurement_decision"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -9,6 +9,7 @@ reliability primitives:
 """
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -31,7 +32,10 @@ class CircuitOpenError(RuntimeError):
 
 class CircuitBreaker:
     """Per-task-type breaker. threshold failures -> open for cooldown_seconds,
-    then half-open (single probe). Success closes, failure re-opens."""
+    then half-open (single probe). Success closes, failure re-opens.
+    
+    Thread-safe: all methods protected by internal RLock.
+    """
 
     def __init__(self, threshold: int = 5, cooldown_seconds: float = 10.0):
         self.threshold = threshold
@@ -39,33 +43,38 @@ class CircuitBreaker:
         self._failures: dict[str, int] = {}
         self._opened_at: dict[str, float] = {}
         self._probing: set[str] = set()
+        self._lock = threading.RLock()
 
     def allow(self, task_type: str) -> bool:
-        if task_type not in self._opened_at:
+        with self._lock:
+            if task_type not in self._opened_at:
+                return True
+            if time.time() - self._opened_at[task_type] < self.cooldown:
+                return False  # open
+            self._probing.add(task_type)  # half-open: allow one probe
             return True
-        if time.time() - self._opened_at[task_type] < self.cooldown:
-            return False  # open
-        self._probing.add(task_type)  # half-open: allow one probe
-        return True
 
     def record_success(self, task_type: str) -> None:
-        self._failures.pop(task_type, None)
-        self._opened_at.pop(task_type, None)
-        self._probing.discard(task_type)
-
-    def record_failure(self, task_type: str) -> None:
-        n = self._failures.get(task_type, 0) + 1
-        self._failures[task_type] = n
-        if task_type in self._probing or n >= self.threshold:
-            self._opened_at[task_type] = time.time()
+        with self._lock:
+            self._failures.pop(task_type, None)
+            self._opened_at.pop(task_type, None)
             self._probing.discard(task_type)
 
+    def record_failure(self, task_type: str) -> None:
+        with self._lock:
+            n = self._failures.get(task_type, 0) + 1
+            self._failures[task_type] = n
+            if task_type in self._probing or n >= self.threshold:
+                self._opened_at[task_type] = time.time()
+                self._probing.discard(task_type)
+
     def state(self, task_type: str) -> str:
-        if task_type not in self._opened_at:
-            return "closed"
-        if time.time() - self._opened_at[task_type] < self.cooldown:
-            return "open"
-        return "half-open"
+        with self._lock:
+            if task_type not in self._opened_at:
+                return "closed"
+            if time.time() - self._opened_at[task_type] < self.cooldown:
+                return "open"
+            return "half-open"
 
 
 def run_with_timeout(fn: Callable[[], Any], timeout_seconds: float,

@@ -1,7 +1,7 @@
 """Rule-based intent for 1:1 chat (token-free, testable).
 
 Intents: help | new | inbox_list | inbox_detail | approval_text |
-price_question | procurement | procurement_followup | chitchat.
+price_question | procurement | procurement_followup | chitchat | lang.
 Procurement multi-turn uses session.state.
 
 Grounded-price policy: market-price questions NEVER go to raw-LLM chitchat
@@ -19,6 +19,8 @@ from ..router import (
     RoutingPlan,
     route,
 )
+
+from .i18n import t, DEFAULT_LANG
 
 # Updated regex with full Vietnamese character support (matches router)
 _APPROVE_RE = re.compile(
@@ -69,27 +71,31 @@ def classify(text: str, session_state: str = "idle") -> str:
     Uses the new router internally but returns legacy intent strings
     for backward compatibility with existing handler code.
     """
-    t = (text or "").strip()
-    low = t.lower()
-    if not t:
+    t_text = (text or "").strip()
+    low = t_text.lower()
+    if not t_text:
         return "help"
     if low in ("/start", "/help", "help", "bắt đầu", "bat dau", "hi", "hello",
-               "xin chào", "xin chao"):
+               "xin chào", "xin chao", "menu", "mở menu", "mo menu"):
         return "help"
     if low in ("/new", "mới", "moi", "reset", "/reset"):
         return "new"
+    if low.startswith("/webhook"):
+        return "webhook"
+    if low.startswith("/lang"):
+        return "lang"
     if low.startswith("/tasks") or low.startswith("tasks") \
             or "inbox" in low or "danh sách" in low or "danh sach" in low:
         return "inbox_list"
     if low.startswith("/task ") or low.startswith("task "):
         return "inbox_detail"
-    approved, _ = parse_approval_text(t)
+    approved, _ = parse_approval_text(t_text)
     if approved is not None:
         return "approval_text"
     # Grounded-price policy: market-price questions are answered from dated
     # quotes only — never raw LLM (prevents invented prices). Takes priority
     # over procurement_followup: asking a price is not answering a spec prompt.
-    if is_price_question(t):
+    if is_price_question(t_text):
         return "price_question"
     if session_state == "awaiting_spec":
         return "procurement_followup"
@@ -118,12 +124,53 @@ def parse_task_id(text: str) -> str:
     return parts[1] if len(parts) > 1 else ""
 
 
-HELP_TEXT = (
-    "⚡ Hermes 1:1 chat (local-first)\n"
-    "• Gửi yêu cầu mua sắm: `mua 50 laptop` (kèm spec/quotes nếu có)\n"
-    "• Gửi PDF báo giá trực tiếp vào chat\n"
-    "• `/tasks [N]` xem inbox, `/task <id>` xem chi tiết\n"
-    "• Duyệt: bấm ✅/❌ hoặc nhắn `approve <id>` / `reject <id>`\n"
-    "• Hỏi giá thị trường: mình chỉ trả lời từ báo giá có ngày, không bịa giá\n"
-    "• `/new` bắt đầu hội thoại mới"
-)
+# HELP_TEXT and MENU_HELP now reference i18n translations
+# These are kept for backward compatibility but use i18n internally
+HELP_TEXT = t("help_text", DEFAULT_LANG)
+
+# Contextual help texts shown when a menu button is pressed.
+# These are kept for backward compatibility but use i18n internally
+MENU_HELP = {
+    "procure": t("menu_procure", DEFAULT_LANG),
+    "price": t("menu_price", DEFAULT_LANG),
+    "kb": t("menu_kb", DEFAULT_LANG),
+    "tasks": t("menu_tasks", DEFAULT_LANG),
+    "advisor": t("menu_advisor", DEFAULT_LANG),
+    "ops": t("menu_ops", DEFAULT_LANG),
+    "competitor": t("menu_competitor", DEFAULT_LANG),
+    "help": HELP_TEXT,
+}
+
+
+def build_menu_keyboard():
+    """Return InlineKeyboardMarkup for the main menu."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    rows = []
+    for row in _MENU_ROWS:
+        rows.append([
+            InlineKeyboardButton(text=label, callback_data=data)
+            for label, data in row
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_reply_keyboard():
+    """Return ReplyKeyboardMarkup with persistent '☰ Mở menu' button."""
+    from telegram import KeyboardButton, ReplyKeyboardMarkup
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(text="☰ Mở menu")]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        selective=True
+    )
+
+
+# --- Menu keyboard layout ---------------------------------------------------
+# Callback data: "menu:<action>"
+_MENU_ROWS = [
+    [("🛒 Mua sắm", "menu:procure"), ("💰 Hỏi giá", "menu:price")],
+    [("🧠 Second Brain", "menu:kb"), ("📋 Tasks", "menu:tasks")],
+    [("📊 Advisor", "menu:advisor"), ("🔌 Ops Hub", "menu:ops")],
+    [("🧭 Competitor", "menu:competitor"), ("ℹ️ Help", "menu:help")],
+]

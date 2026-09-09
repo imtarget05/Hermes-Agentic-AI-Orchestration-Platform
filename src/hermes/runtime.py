@@ -6,9 +6,11 @@ orchestrate (DAG) → recommendation (PENDING_APPROVAL → Telegram approval).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from .agents import configure_agents_llm
+from .competitor import CompetitorTarget
 from .config import settings
 from .llm import build_llm, build_router_classifier
 from .messaging import SafeNotifier, build_notifier
@@ -32,6 +34,30 @@ def parse_quote_files(paths: list[str], sandbox: str = "") -> list[dict]:
     return quotes
 
 
+def _load_default_competitors() -> list[CompetitorTarget]:
+    """Load default competitor targets from HERMES_DEFAULT_COMPETITORS env var.
+    
+    Format: JSON array of objects with competitor, urls, feeds.
+    Example: '[{"competitor": "Dell", "urls": ["https://dell.com/news"], "feeds": []}]'
+    
+    If not set, returns default list: Dell, Lenovo, HP.
+    """
+    env_val = os.environ.get("HERMES_DEFAULT_COMPETITORS", "").strip()
+    if env_val:
+        try:
+            parsed = json.loads(env_val)
+            if isinstance(parsed, list):
+                return [CompetitorTarget(**t) if isinstance(t, dict) else t for t in parsed]
+        except Exception:
+            pass
+    # Default competitors
+    return [
+        CompetitorTarget(competitor="Dell", urls=["https://www.dell.com/news"], feeds=[]),
+        CompetitorTarget(competitor="Lenovo", urls=["https://www.lenovo.com/news"], feeds=[]),
+        CompetitorTarget(competitor="HP", urls=["https://www.hp.com/news"], feeds=[]),
+    ]
+
+
 class HermesRuntime:
     """Wires registry + LLM + router + store + notifier once, runs tasks."""
 
@@ -48,6 +74,39 @@ class HermesRuntime:
         self.router = RouterAgent(self.registry, classify=build_router_classifier(self.llm, self.registry.projects()))
         self.store = TaskStore(settings.hermes_db_path, dsn=settings.hermes_database_url or None)
         self.notifier = SafeNotifier(build_notifier(settings.telegram_bot_token, self.registry))
+        self._domain_svc = None
+
+    def services(self) -> dict:
+        """Lazy domain services (Phase 1-4): knowledge/ops/advisor/competitor/eval."""
+        svc = self._domain_svc
+        if svc is None:
+            import os
+            from .advisor import AdvisoryCouncil
+            from .competitor import CompetitorCollector
+            from .harness import HarnessEvaluator
+            from .knowledge import KnowledgeService
+            from .ops import OpsHub
+            ops_hub = OpsHub()
+            for kind, name in [("crm", "CRM"), ("invoicing", "Invoicing"),
+                                ("calendar", "Calendar"), ("inbox", "Inbox")]:
+                env_var = f"HERMES_{kind.upper()}_API_URL"
+                url = os.environ.get(env_var, "")
+                if url:
+                    ops_hub.add_source(kind=kind, name=name, enabled=True,
+                                       config={"base_url": url})
+
+            svc = {
+                "knowledge": KnowledgeService(self.settings.hermes_knowledge_db),
+                "ops": ops_hub,
+                "council": AdvisoryCouncil(llm=self.llm),
+                "competitor": CompetitorCollector(),
+                "eval": HarnessEvaluator(),
+                "competitor_targets": _load_default_competitors(),
+            }
+            from .async_engine.orchestrator import set_default_eval_registry
+            set_default_eval_registry(svc["eval"].registry)
+            self._domain_svc = svc
+        return svc
 
     @property
     def llm_mode(self) -> str:
@@ -87,6 +146,20 @@ class HermesRuntime:
         orchestrate(task.id, self.store, self.notifier, quotes=quotes,
                      required_spec=required_spec)
         return self.store.get(task.id)
+
+
+_runtime = HermesRuntime()
+
+
+def get_runtime() -> HermesRuntime:
+    """Return the shared HermesRuntime singleton."""
+    return _runtime
+
+
+def reset_runtime() -> None:
+    """Reset the singleton runtime (used by tests)."""
+    global _runtime
+    _runtime = HermesRuntime()
 
 
 def default_demo_quotes() -> list[dict]:

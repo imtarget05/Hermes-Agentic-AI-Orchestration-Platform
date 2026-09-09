@@ -17,6 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
+hermes = "hermes.cli:main"
 hermes-scraper = "hermes.scraper_worker.cli:main"
 
 [project.optional-dependencies]

@@ -49,6 +49,7 @@ def _env_float(name: str, default: float) -> float:
 class BudgetLimits:
     max_tasks: int = field(default_factory=lambda: _env_int("HERMES_MAX_TASKS_PER_WORKFLOW", 50))
     max_agents: int = field(default_factory=lambda: _env_int("HERMES_MAX_AGENTS", 8))
+    max_dag_depth: int = field(default_factory=lambda: _env_int("HERMES_MAX_DAG_DEPTH", 5))
     max_iterations: int = field(default_factory=lambda: _env_int("HERMES_MAX_ITERATIONS", 5))
     max_tokens: float = field(default_factory=lambda: _env_float("HERMES_MAX_TOKEN_BUDGET", 200_000))
     max_time_seconds: float = field(default_factory=lambda: _env_float("HERMES_MAX_TIME_BUDGET_SECONDS", 300))

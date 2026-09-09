@@ -156,8 +156,17 @@ def run_procurement_case(
     rec: dict[str, Any] = {}
     try:
         results = agg.get("results", {})
-        vrows = results.get("verification-1", [])
-        arows = results.get("analysis-1", [])
+
+        def _rows_for(suffix: str) -> list:
+            # results keys may carry the workflow prefix (T2.5), e.g.
+            # "{wf}-verification-1" — resolve by exact id or suffix.
+            for key, rows in results.items():
+                if key == suffix or str(key).endswith(f"-{suffix}"):
+                    return rows or []
+            return []
+
+        vrows = _rows_for("verification-1")
+        arows = _rows_for("analysis-1")
         raw = ""
         if vrows:
             raw = str(vrows[-1].get("result_uri", ""))

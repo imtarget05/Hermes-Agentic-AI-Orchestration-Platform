@@ -147,7 +147,12 @@ def _rag_lines(task: Any, query: str, top_k: int = 2) -> list[str]:
 
 
 def _sibling_results(store: Any, task: Any, task_ids: list[str]) -> dict[str, str]:
-    """Read already-completed sibling results from the store (join support)."""
+    """Read already-completed sibling results from the store (join support).
+
+    Task ids may carry a workflow prefix (`{wf}-price-1`, T2.5 uniqueness), so
+    each requested id resolves first verbatim, then under the current task's
+    workflow prefix.
+    """
     out: dict[str, str] = {}
     if store is None:
         return out
@@ -155,14 +160,24 @@ def _sibling_results(store: Any, task: Any, task_ids: list[str]) -> dict[str, st
         store.task_results(task.task_id)  # probe availability
     except Exception:
         return out
+    # workflow prefix of the current task: "{wf}-{agent}-{n}" → "{wf}"
+    base = ""
+    parts = str(getattr(task, "task_id", "")).rsplit("-", 2)
+    if len(parts) == 3 and parts[2].isdigit() and parts[0]:
+        base = parts[0]
     for tid in task_ids:
-        try:
-            rows = store.task_results(tid)
-        except Exception:
-            continue
-        if rows:
-            last = rows[-1] if isinstance(rows, list) else rows
-            out[tid] = str(last.get("result_uri", "") if isinstance(last, dict) else last)
+        candidates = [tid]
+        if base and not tid.startswith(f"{base}-"):
+            candidates.append(f"{base}-{tid}")
+        for cand in candidates:
+            try:
+                rows = store.task_results(cand)
+            except Exception:
+                continue
+            if rows:
+                last = rows[-1] if isinstance(rows, list) else rows
+                out[tid] = str(last.get("result_uri", "") if isinstance(last, dict) else last)
+                break
     return out
 
 

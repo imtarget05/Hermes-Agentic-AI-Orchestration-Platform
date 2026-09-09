@@ -243,3 +243,27 @@ Verify bằng cách giả lập event bus chết hoàn toàn (`_BrokenEventBus` 
 ## Secrets
 
 Không commit `.env`, `*.db`. Tokens chỉ qua env: `CLOUDFLARE_API_TOKEN`, `TELEGRAM_BOT_TOKEN`.
+
+## Mở rộng đa domain (Phase 1-5, 2026-09-08)
+
+Ngoài procurement, Hermes giờ có 5 domain mới (dùng chung harness guardrails/eval):
+
+| Endpoint | Mô tả |
+|---|---|
+| `POST /knowledge/ingest` | Nạp tài liệu (`scope: team\|personal`) |
+| `GET /knowledge/query?q=&scope=` | Hỏi KB team / Second Brain, trả lời kèm `[source=…]` |
+| `POST /advisor/ask` | Hội đồng cố vấn (operations/finance/risk/market) |
+| `GET/POST/DELETE /ops/sources` | Quản lý nguồn CRM/invoicing/calendar/inbox (mock-first) |
+| `GET /ops/attention` | Tổng hợp việc cần chú ý theo severity |
+| `POST /competitor/watch` | Theo dõi đối thủ qua URL |
+| `GET /competitor/brief` | Weekly brief đối thủ (chỉ từ findings có nguồn) |
+| `GET /harness/metrics` | Success rate, latency, cost, error trace |
+
+Telegram 1:1 hiểu thêm: hỏi KB team, hỏi "của tôi" (Second Brain), `lưu vào`
+(kb_ingest), `lưu tài liệu của tôi` (brain_ingest), `cố vấn/tư vấn` (advisor),
+`hôm nay cần chú ý gì` (ops), `kết nối nguồn CRM…` (ops_connect). PDF không
+phải báo giá gửi vào chat sẽ tự nạp vào Second Brain cá nhân.
+
+Chi tiết kế hoạch: `implementation_plan.md`. Tests: `tests/test_domains.py`,
+`tests/test_harness.py`, case mới trong `tests/test_intent_router.py`.
+

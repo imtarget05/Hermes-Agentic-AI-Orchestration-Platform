@@ -30,6 +30,8 @@ def test_intent_matrix():
     from hermes.telegram_chat.intent import classify, parse_approval_text
     assert classify("/start") == "help"
     assert classify("/new") == "new"
+    assert classify("/webhook") == "webhook"
+    assert classify("/lang") == "lang"
     assert classify("/tasks 5") == "inbox_list"
     assert classify("/task abc") == "inbox_detail"
     assert classify("approve abc123") == "approval_text"
@@ -166,9 +168,10 @@ def test_webhook_info_and_secret(monkeypatch):
 
     from hermes import api
     from hermes.config import settings
+    from hermes.runtime import reset_runtime
     monkeypatch.setattr(settings, "telegram_bot_token", "")
     monkeypatch.setattr(settings, "telegram_webhook_secret", "s3cr3t")
-    api._runtime = None
+    reset_runtime()
     c = TestClient(api.app)
     assert c.get("/telegram/webhook").status_code == 200
     r = c.post("/telegram/webhook", json={"update_id": 1},
@@ -203,9 +206,125 @@ def test_dispatch_message_help():
         # allow-all (no allowlist in test env)
         action = await dispatch_update(data, handler=h, bot=bot)
         assert action == "message"
-        assert bot.sent and "Hermes 1:1" in bot.sent[0][1]
+        assert bot.sent and "Hermes" in bot.sent[0][1]
 
     import tempfile
     from pathlib import Path
     with tempfile.TemporaryDirectory() as td:
         asyncio.run(_go(Path(td)))
+
+
+def test_lang_command_toggles_language():
+    """Test /lang command toggles between vi and en."""
+    pytest.importorskip("telegram")
+    import asyncio
+
+    from hermes.telegram_chat.handler import ChatHandler
+    from hermes.telegram_chat.session import ChatSessionStore
+    from hermes.telegram_chat.webhook import dispatch_update
+
+    class FakeBot:
+        def __init__(self):
+            self.sent: list = []
+
+        async def send_message(self, chat_id=None, text=None, **kw):
+            self.sent.append((str(chat_id), text or ""))
+
+    async def _go(tmp_path):
+        bot = FakeBot()
+        h = ChatHandler(bot, sessions=ChatSessionStore(str(tmp_path / "s.db")))
+        
+        # Initial state should be Vietnamese (default)
+        data = {"update_id": 1, "message": {
+            "message_id": 1, "date": 1,
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "is_bot": False, "first_name": "T",
+                     "username": "tester"},
+            "text": "/lang"}}
+        action = await dispatch_update(data, handler=h, bot=bot)
+        assert action == "message"
+        assert bot.sent and "Tiếng Việt" in bot.sent[0][1]
+        
+        # Second /lang should switch to English
+        bot.sent.clear()
+        data["update_id"] = 2
+        data["message"]["message_id"] = 2
+        data["message"]["text"] = "/lang"
+        action = await dispatch_update(data, handler=h, bot=bot)
+        assert action == "message"
+        assert bot.sent and "English" in bot.sent[0][1]
+        
+        # Third /lang should switch back to Vietnamese
+        bot.sent.clear()
+        data["update_id"] = 3
+        data["message"]["message_id"] = 3
+        data["message"]["text"] = "/lang"
+        action = await dispatch_update(data, handler=h, bot=bot)
+        assert action == "message"
+        assert bot.sent and "Tiếng Việt" in bot.sent[0][1]
+
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        asyncio.run(_go(Path(td)))
+
+
+def test_i18n_translations_exist_both_languages():
+    """Test that all translation keys exist in both Vietnamese and English."""
+    from hermes.telegram_chat.i18n import TRANSLATIONS, DEFAULT_LANG, get_available_languages
+    
+    # Both languages should be available
+    langs = get_available_languages()
+    assert "vi" in langs
+    assert "en" in langs
+    assert DEFAULT_LANG == "vi"
+    
+    # All keys should exist in both languages
+    vi_keys = set(TRANSLATIONS["vi"].keys())
+    en_keys = set(TRANSLATIONS["en"].keys())
+    
+    assert vi_keys == en_keys, f"Key mismatch: vi has {vi_keys - en_keys}, en has {en_keys - vi_keys}"
+    
+    # Check essential keys exist
+    essential_keys = {
+        "help_text", "menu_procure", "menu_price", "menu_kb", "menu_tasks",
+        "menu_advisor", "menu_ops", "menu_competitor", "full_help_text",
+        "webhook_status", "webhook_missing_url", "webhook_no_token",
+        "competitor_watch_added", "competitor_no_targets", "competitor_no_findings",
+        "competitor_brief_header", "procurement_start", "procurement_need_spec",
+        "procurement_result", "pdf_received", "pdf_ingested", "pdf_failed",
+        "approval_prompt", "approval_approved", "approval_rejected",
+        "welcome_new", "rate_limited", "no_permission", "no_procurement_permission",
+        "error_generic", "webhook_info_error", "approval_not_found",
+        "task_not_found", "error_reading_inbox", "error_reading_task",
+        "pdf_read_error", "lang_switched_vi", "lang_switched_en",
+        "lang_current", "menu_button_text"
+    }
+    
+    for key in essential_keys:
+        assert key in vi_keys, f"Missing key in vi: {key}"
+        assert key in en_keys, f"Missing key in en: {key}"
+        # Both should have non-empty values
+        assert TRANSLATIONS["vi"][key].strip(), f"Empty value for {key} in vi"
+        assert TRANSLATIONS["en"][key].strip(), f"Empty value for {key} in en"
+
+
+def test_i18n_t_function_formatting():
+    """Test t() function with formatting kwargs."""
+    from hermes.telegram_chat.i18n import t
+    
+    # Test with formatting
+    result_vi = t("competitor_watch_added", "vi", name="Dell", count=2)
+    assert "Dell" in result_vi
+    assert "2" in result_vi
+    
+    result_en = t("competitor_watch_added", "en", name="Dell", count=2)
+    assert "Dell" in result_en
+    assert "2" in result_en
+    
+    # Test fallback to default lang
+    result = t("nonexistent_key", "vi")
+    assert result == "nonexistent_key"
+    
+    result = t("help_text", "fr")  # fr not supported, should fallback to vi
+    assert "Hermes" in result

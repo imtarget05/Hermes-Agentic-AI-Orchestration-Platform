@@ -2,8 +2,14 @@ from .agent import RouterAgent
 from .intent_router import build_routing_plan, classify_intent, route
 from .registry import Route, RoutingRegistry
 from .routing_plan import (
+    AGENT_ADVISOR,
     AGENT_ANALYSIS,
+    AGENT_BRAIN_ANSWER,
+    AGENT_COMPETITOR_ANALYZE,
+    AGENT_COMPETITOR_COLLECT,
     AGENT_CONTRACT,
+    AGENT_KB_ANSWER,
+    AGENT_OPS_AGGREGATOR,
     AGENT_PRICE,
     AGENT_SPEC,
     AGENT_VENDOR,
@@ -32,6 +38,12 @@ __all__ = [
     "AGENT_SPEC",
     "AGENT_ANALYSIS",
     "AGENT_VERIFICATION",
+    "AGENT_ADVISOR",
+    "AGENT_OPS_AGGREGATOR",
+    "AGENT_COMPETITOR_COLLECT",
+    "AGENT_COMPETITOR_ANALYZE",
+    "AGENT_KB_ANSWER",
+    "AGENT_BRAIN_ANSWER",
     "classify_intent",
     "build_routing_plan",
     "route",

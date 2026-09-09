@@ -66,7 +66,7 @@ ON CONFLICT(task_id, status) DO UPDATE SET
 
 _DDL_WORKFLOWS = """
 CREATE TABLE IF NOT EXISTS workflows (
-    id TEXT PRIMARY KEY, status TEXT, created_at TEXT, completed_at TEXT
+    id TEXT PRIMARY KEY, status TEXT, created_at TEXT, completed_at TEXT, iteration_count INTEGER DEFAULT 0
 )
 """
 
@@ -90,6 +90,26 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 )
 """
 
+_DDL_OUTBOX_SQLITE = """
+CREATE TABLE IF NOT EXISTS outbox_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    published_at TEXT
+)
+"""
+
+_DDL_OUTBOX_PG = """
+CREATE TABLE IF NOT EXISTS outbox_events (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TEXT NOT NULL,
+    published_at TEXT
+)
+"""
+
 
 class _Backend:
     """Wrapper unifying sqlite3 and psycopg3 connections."""
@@ -109,12 +129,12 @@ class _Backend:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             con.executescript(
                 _DDL_TASKS + ";" + _DDL_TASK_RESULTS + ";"
-                + _DDL_WORKFLOWS + ";" + _DDL_EXEC_STATE + ";" + _DDL_TASK_DEPS + ";" + _DDL_IDEMPOTENCY_KEYS + ";"
+                + _DDL_WORKFLOWS + ";" + _DDL_EXEC_STATE + ";" + _DDL_TASK_DEPS + ";" + _DDL_IDEMPOTENCY_KEYS + ";" + _DDL_OUTBOX_SQLITE + ";"
             )
             con.execute(_DDL_TASK_RESULTS_UX)
         else:
             for ddl in (_DDL_TASKS, _DDL_TASK_RESULTS_PG, _DDL_WORKFLOWS,
-                        _DDL_EXEC_STATE, _DDL_TASK_DEPS, _DDL_IDEMPOTENCY_KEYS):
+                        _DDL_EXEC_STATE, _DDL_TASK_DEPS, _DDL_IDEMPOTENCY_KEYS, _DDL_OUTBOX_PG):
                 con.execute(ddl)
             con.execute(_DDL_TASK_RESULTS_UX)
         con.commit()
@@ -187,6 +207,15 @@ class AsyncTaskStore:
         at = _now()
         self._exec("UPDATE workflows SET status=?, completed_at=? WHERE id=?",
                    (status, at, workflow_id))
+
+    def increment_workflow_iteration(self, workflow_id: str) -> int:
+        """Increment iteration counter and return new value. For T2.4 max_iterations enforcement."""
+        self._exec(
+            "UPDATE workflows SET iteration_count = iteration_count + 1 WHERE id=?",
+            (workflow_id,)
+        )
+        row = self._exec("SELECT iteration_count FROM workflows WHERE id=?", (workflow_id,), fetch="one")
+        return row["iteration_count"] if row else 0
 
     # ---- tasks ----
     def create_task(self, task: Task) -> Task:
@@ -447,6 +476,39 @@ class AsyncTaskStore:
         rows = self._exec("SELECT status, COUNT(*) AS c FROM tasks GROUP BY status",
                           fetch="all") or []
         return {dict(r)["status"]: dict(r)["c"] for r in rows}
+
+    # ---- outbox (T4.1: transactional audit) ----
+    def write_outbox_event(self, event_type: str, payload: dict) -> None:
+        """Write an event to the outbox table within the current transaction.
+        
+        Call this method within the same transaction as business state changes
+        to ensure atomicity (T4.1: transactional outbox pattern).
+        """
+        import json as _json
+        self._exec(
+            "INSERT INTO outbox_events (event_type, payload, created_at) VALUES (?,?,?)",
+            (event_type, _json.dumps(payload, default=str), _now()),
+        )
+
+    def get_unpublished_outbox_events(self, limit: int = 100) -> list[dict]:
+        """Get unpublished events from the outbox for the relay to publish."""
+        rows = self._exec(
+            "SELECT id, event_type, payload, created_at FROM outbox_events "
+            "WHERE published_at IS NULL ORDER BY id LIMIT ?",
+            (limit,), fetch="all"
+        ) or []
+        return [dict(r) for r in rows]
+
+    def mark_outbox_published(self, event_ids: list[int]) -> None:
+        """Mark outbox events as published."""
+        if not event_ids:
+            return
+        placeholders = ",".join("?" for _ in event_ids)
+        at = _now()
+        self._exec(
+            f"UPDATE outbox_events SET published_at=? WHERE id IN ({placeholders})",
+            (at, *event_ids),
+        )
 
 
 def init_async_db(db_path: str, dsn: str | None = None) -> None:

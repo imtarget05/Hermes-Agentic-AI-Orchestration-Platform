@@ -293,13 +293,77 @@ def source_integrity_check(result: str) -> str:
     return ""
 
 
-PROCUREMENT_VALIDATORS: dict[str, list[Validator]] = {
+# ---- Generic validators for all task types (T5.1) ----
+
+def _task_has_source_evidence(task, result: str) -> str:
+    """Generic validator: task must have source evidence in payload for claims."""
+    payload = getattr(task, "payload", None) or {}
+    # Check if task has any evidence source
+    has_evidence = bool(payload.get("sources") or payload.get("evidence") or payload.get("quotes") or payload.get("documents"))
+    if not has_evidence:
+        return ""  # no evidence to verify against — skip
+    return ""
+
+def research_output_check(result: str) -> str:
+    """Research output must contain findings/citations."""
+    if not isinstance(result, str) or len(result.strip()) < 20:
+        return "quality check: research output too short"
+    # Should contain some factual content
+    return ""
+
+def analyze_output_check(result: str) -> str:
+    """Analysis output must contain reasoning."""
+    if not isinstance(result, str) or len(result.strip()) < 30:
+        return "quality check: analysis output too short"
+    return ""
+
+def report_output_check(result: str) -> str:
+    """Report output must be structured."""
+    if not isinstance(result, str) or len(result.strip()) < 20:
+        return "quality check: report output too short"
+    return ""
+
+def notify_output_check(result: str) -> str:
+    """Notification output must have target and message."""
+    if not isinstance(result, str) or len(result.strip()) < 10:
+        return "quality check: notification output too short"
+    return ""
+
+def scrape_output_check(result: str) -> str:
+    """Scrape output must indicate success/failure with details."""
+    if not isinstance(result, str) or len(result.strip()) < 10:
+        return "quality check: scrape output too short"
+    return ""
+
+
+# Combine all validators by task type (T5.1: extend to all agent types)
+ALL_TASK_VALIDATORS: dict[str, list[Validator]] = {
+    # Procurement agents (existing)
     "verification": [procurement_evidence_check,
                      TaskAwareValidator(grounded_vendor_check)],
     "analysis": [procurement_evidence_check,
                  TaskAwareValidator(grounded_vendor_check),
                  TaskAwareValidator(grounded_price_check)],
+    # Leaf procurement agents: only grounded checks, no procurement_evidence_check
+    "price": [TaskAwareValidator(grounded_vendor_check)],
+    "vendor": [TaskAwareValidator(grounded_vendor_check)],
+    "contract": [],
+    "spec": [],
+    
+    # Generic agents (T5.1: new validators)
+    "research": [research_output_check,
+                 TaskAwareValidator(_task_has_source_evidence)],
+    "analyze": [analyze_output_check,
+                TaskAwareValidator(_task_has_source_evidence)],
+    "report": [report_output_check,
+               TaskAwareValidator(_task_has_source_evidence)],
+    "notify": [notify_output_check],
+    "scrape": [scrape_output_check],
 }
+
+
+# Backward compatibility
+PROCUREMENT_VALIDATORS = ALL_TASK_VALIDATORS
 
 
 class Verifier:

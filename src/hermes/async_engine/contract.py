@@ -128,6 +128,7 @@ class Workflow(BaseModel):
     status: str = "running"
     created_at: str = Field(default_factory=_now)
     completed_at: str = ""
+    iteration_count: int = 0  # T2.4: track planning iterations
 
     def done(self, status: str = "completed") -> None:
         self.status = status

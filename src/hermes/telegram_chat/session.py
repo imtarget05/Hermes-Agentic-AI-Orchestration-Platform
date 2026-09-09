@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS telegram_sessions (
     pending_task_id TEXT DEFAULT '',
     pending_approval_id TEXT DEFAULT '',
     history_json TEXT DEFAULT '[]',
+    lang TEXT DEFAULT 'vi',
     updated_at TEXT DEFAULT ''
 )
 """
@@ -60,12 +61,15 @@ class ChatSessionStore:
                 d["history"] = json.loads(d.get("history_json") or "[]")
             except Exception:
                 d["history"] = []
+            # Ensure lang defaults to 'vi'
+            if "lang" not in d or not d["lang"]:
+                d["lang"] = "vi"
             return d
         return {
             "chat_id": cid, "username": "", "state": "idle",
             "pending_text": "", "pending_spec": "",
             "pending_task_id": "", "pending_approval_id": "",
-            "history": [], "updated_at": "",
+            "history": [], "lang": "vi", "updated_at": "",
         }
 
     def save(self, chat_id: str | int, **fields) -> dict:
@@ -75,18 +79,18 @@ class ChatSessionStore:
         self._exec(
                 "INSERT INTO telegram_sessions "
                 "(chat_id, username, state, pending_text, pending_spec, "
-                " pending_task_id, pending_approval_id, history_json, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?) "
+                " pending_task_id, pending_approval_id, history_json, lang, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(chat_id) DO UPDATE SET "
                 "username=excluded.username, state=excluded.state, "
                 "pending_text=excluded.pending_text, pending_spec=excluded.pending_spec, "
                 "pending_task_id=excluded.pending_task_id, "
                 "pending_approval_id=excluded.pending_approval_id, "
-                "history_json=excluded.history_json, updated_at=excluded.updated_at",
+                "history_json=excluded.history_json, lang=excluded.lang, updated_at=excluded.updated_at",
                 (cid, cur.get("username", ""), cur.get("state", "idle"),
                  cur.get("pending_text", ""), cur.get("pending_spec", ""),
                  cur.get("pending_task_id", ""), cur.get("pending_approval_id", ""),
-                 json.dumps(cur.get("history", [])), _now()))
+                 json.dumps(cur.get("history", [])), cur.get("lang", "vi"), _now()))
         return self.get(cid)
 
     def append_history(self, chat_id: str | int, role: str, text: str,

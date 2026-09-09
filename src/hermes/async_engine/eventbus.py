@@ -7,6 +7,7 @@ Provides:
 - KafkaEventBus   (confluent-kafka; import guarded)
 - JsonlEventBus   (append events to a JSONL file — portable, no broker)
 - InMemoryEventBus (in-memory list for tests)
+- OutboxEventBus  (writes to DB outbox table — transactional audit, T4.1)
 """
 from __future__ import annotations
 
@@ -123,6 +124,26 @@ class KafkaEventBus:
                 self._producer.flush(timeout)
             except Exception:
                 pass
+
+
+class OutboxEventBus:
+    """Writes events to the DB outbox table — transactional audit (T4.1).
+    
+    This bus should be used by the orchestrator/worker instead of KafkaEventBus
+    to ensure events are atomically committed with business state changes.
+    A separate relay process reads from the outbox and publishes to Kafka.
+    """
+
+    def __init__(self, store) -> None:
+        self.store = store
+
+    def emit(self, event_type: str, **fields: Any) -> dict[str, Any]:
+        from .contract import EVENT_TOPICS
+        ev = make_event(event_type, **fields)
+        topic = EVENT_TOPICS.get(event_type, "hermes.task.events")
+        payload = {"topic": topic, "event": ev}
+        self.store.write_outbox_event(event_type, payload)
+        return ev
 
 
 def emit_best_effort(bus: EventBus, event_type: str, **fields: Any) -> dict[str, Any] | None:

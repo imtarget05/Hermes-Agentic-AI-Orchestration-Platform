@@ -21,8 +21,10 @@ from typing import Any
 
 from .budgets import (
     BudgetExceededError,
+    BudgetLimits,
     CostTracker,
     validate_graph_budget,
+    DEFAULT_LIMITS,
 )
 from .contract import (
     EVENT_COMPLETED,
@@ -36,11 +38,28 @@ from .contract import (
 from .dag import TaskDAG, build_dag
 from .eventbus import emit_best_effort
 from .state_machine import DAGStateMachine
+from .tracing import (
+    maybe_trace_workflow,
+    maybe_trace_task,
+    record_task_execution,
+    record_workflow_duration,
+)
 from .worker import Worker, WorkerPool
 
 DEFAULT_TASK_TYPES = ("research", "analyze", "report", "notify",
                         "price", "vendor", "contract", "spec", "analysis", "verification")
 VALID_TASK_TYPES = set(DEFAULT_TASK_TYPES)
+
+# Optional global default harness metrics sink. When set (e.g. from
+# Hermes.runtime), every orchestrator created without an explicit
+# eval_registry will report task executions to it automatically.
+_default_eval_registry: Any = None
+
+
+def set_default_eval_registry(registry: Any) -> None:
+    """Set the module-level default EvaluationRegistry for orchestrators."""
+    global _default_eval_registry
+    _default_eval_registry = registry
 
 # Max retries per task type from policy
 MAX_RETRIES_POLICY: dict[str, int] = {
@@ -58,20 +77,27 @@ MAX_RETRIES_POLICY: dict[str, int] = {
 
 
 class AsyncOrchestrator:
-    def __init__(self, store, bus, events=None, metrics=None):
+    def __init__(self, store, bus, events=None, metrics=None, eval_registry=None):
         self.store = store
         self.bus = bus
         self.events = events if events is not None else _NoopEvents()
         self.metrics = metrics
+        # Use explicit registry, else fall back to module-level default.
+        self.eval_registry = eval_registry if eval_registry is not None else _default_eval_registry
         self._dispatch_lock = threading.RLock()
         self._dispatched: set[str] = set()
+        self._task_start: dict[str, float] = {}  # task_id → monotonic start
 
-    def validate(self, payload: dict[str, Any], task_types: list[str]) -> None:
+    def validate(self, payload: dict[str, Any], task_types: list[str], limits: BudgetLimits | None = None) -> None:
+        lim = limits or DEFAULT_LIMITS
         if not isinstance(task_types, list) or not task_types:
             raise ValueError("task_types must be a non-empty list")
         bad = [t for t in task_types if t not in VALID_TASK_TYPES]
         if bad:
             raise ValueError(f"invalid task type(s): {bad}")
+        if len(task_types) > lim.max_agents:
+            raise BudgetExceededError(
+                f"budget: {len(task_types)} task types requested > MAX_AGENTS={lim.max_agents}")
 
     def create_workflow(self) -> Workflow:
         wf_id = Workflow().id
@@ -116,6 +142,8 @@ class AsyncOrchestrator:
     def dispatch(self, task: Task) -> None:
         exchange, routing_key, queue = routing_for(task.task_type)
         self.bus.publish(exchange, routing_key, task.to_message())
+        if self.eval_registry is not None:
+            self._task_start[task.task_id] = time.time()
 
     def dispatch_all(self, tasks: list[Task]) -> None:
         for t in tasks:
@@ -142,6 +170,21 @@ class AsyncOrchestrator:
         self._dispatched.update(dispatched)
         return dispatched
 
+    def _record_eval(self, task: Task, success: bool, error_trace: str = "") -> None:
+        """Record a task execution sample into the harness eval registry."""
+        if self.eval_registry is None:
+            return
+        start = self._task_start.pop(task.task_id, None)
+        latency_ms = ((time.time() - start) * 1000.0) if start else 0.0
+        self.eval_registry.record(
+            domain=task.task_type,
+            callable_name=task.task_id,
+            success=success,
+            latency_ms=latency_ms,
+            error_trace=error_trace[:300],
+            task_id=task.task_id,
+        )
+
     # ---- aggregation ----
     def aggregate(self, workflow_id: str) -> dict[str, Any]:
         tasks = self.store.list_workflow_tasks(workflow_id)
@@ -158,8 +201,17 @@ class AsyncOrchestrator:
         }
 
     # ---- resume workflow ----
-    def resume_workflow(self, workflow_id: str, from_task_id: str | None = None) -> dict[str, Any]:
+    def resume_workflow(self, workflow_id: str, from_task_id: str | None = None,
+                        limits: BudgetLimits | None = None) -> dict[str, Any]:
         """Rebuild DAG from persisted state, skip completed, retry failed with backoff, handle PARTIAL."""
+        lim = limits or DEFAULT_LIMITS
+        
+        # T2.4: Increment and check iteration count
+        iteration = self.store.increment_workflow_iteration(workflow_id)
+        if iteration > lim.max_iterations:
+            raise BudgetExceededError(
+                f"budget: workflow iteration {iteration} > MAX_ITERATIONS={lim.max_iterations}")
+        
         tasks = self.store.get_tasks_for_resume(workflow_id)
         if not tasks:
             return {"workflow_id": workflow_id, "resumed": 0, "message": "No resumable tasks found"}
@@ -170,7 +222,7 @@ class AsyncOrchestrator:
         for task in all_tasks:
             deps = self.store.get_dependencies(task.task_id)
             dag_nodes.append({"task_id": task.task_id, "task": task.to_message(), "deps": deps})
-        dag = build_dag(dag_nodes)
+        dag = build_dag(dag_nodes, max_depth=lim.max_dag_depth)
 
         # Update DAG status from store
         for task in all_tasks:
@@ -213,7 +265,7 @@ class AsyncOrchestrator:
             self.dispatch(task)
             resumed_count += 1
 
-        return {"workflow_id": workflow_id, "resumed": resumed_count}
+        return {"workflow_id": workflow_id, "resumed": resumed_count, "iteration": iteration}
 
     # ---- end-to-end run (no external broker) ------------------------------ #
     def run_workflow(
@@ -225,17 +277,32 @@ class AsyncOrchestrator:
         verifier=None,
         breaker=None,
         task_timeout_seconds: float = 30.0,
+        limits: BudgetLimits | None = None,
+        workflow: Workflow | None = None,
     ) -> dict[str, Any]:
         """Full parallel DAG run on one bus (InMemory by default). Blocks until
         every task is terminal. Returns the aggregate report."""
         for node in graph:
             if node["task_type"] not in handlers:
                 raise ValueError(f"no handler for task_type {node['task_type']}")
-        self.validate({}, [n["task_type"] for n in graph])
-        validate_graph_budget(graph)
-        wf = self.create_workflow()
+        lim = limits or DEFAULT_LIMITS
+        self.validate({}, [n["task_type"] for n in graph], lim)
+        validate_graph_budget(graph, lim)
+        
+        if workflow is not None:
+            wf = workflow
+        else:
+            wf = self.create_workflow()
+        
+        # T2.4: Check iteration limit before starting
+        if wf.iteration_count >= lim.max_iterations:
+            raise BudgetExceededError(
+                f"budget: workflow iteration {wf.iteration_count} >= MAX_ITERATIONS={lim.max_iterations}")
+        
         # HERMES-09: shared cost/time budget for this workflow run
         tracker = CostTracker(workflow_id=wf.id)
+        
+        workflow_start = time.time()
 
         for node in graph:
             if not node.get("task_id"):
@@ -245,7 +312,7 @@ class AsyncOrchestrator:
             {"task_id": t.task_id, "task": t.to_message(),
              "deps": node.get("deps", []) or []}
             for t, node in zip(tasks, graph)
-        ])
+        ], max_depth=lim.max_dag_depth)
         self._dispatched = set()
 
         def handler(task: Task) -> str:
@@ -262,6 +329,8 @@ class AsyncOrchestrator:
                 emit_best_effort(self.events, EVENT_COMPLETED, task_id=task.task_id,
                                  workflow_id=wf.id, worker_id="orchestrator",
                                  result_uri=result_uri[:200])
+                record_task_execution(task.task_type, "completed")
+                self._record_eval(task, success=True)
                 # Update execution state for completed task
                 self.store.update_task_execution_state(task.task_id, {
                     "attempt": task.attempt,
@@ -279,6 +348,8 @@ class AsyncOrchestrator:
                 emit_best_effort(self.events, EVENT_FAILED, task_id=task.task_id,
                                  workflow_id=wf.id, worker_id="orchestrator",
                                  error=err[:300])
+                record_task_execution(task.task_type, "failed")
+                self._record_eval(task, success=False, error_trace=err)
                 # Update execution state for failed task
                 self.store.update_task_execution_state(task.task_id, {
                     "attempt": task.attempt,
@@ -310,21 +381,32 @@ class AsyncOrchestrator:
             return w
 
         pool = WorkerPool(build, size=max(1, workers))
-        pool.start()
-        try:
-            for tid in dag.ready_tasks():
-                self._dispatched.add(tid)
-                self.dispatch(self.store.get_task(tid))
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                with self._dispatch_lock:
-                    pending = [tid for tid, st in dag.status.items() if st == "pending"]
-                if not pending:
-                    break
-                time.sleep(0.005)
-        finally:
-            pool.stop()
+        
+        # T7.1: Trace workflow execution
+        with maybe_trace_workflow(wf.id, "workflow.execute") as wf_span:
+            if wf_span:
+                wf_span.set_attribute("workflow.task_count", len(tasks))
+                wf_span.set_attribute("workflow.workers", workers)
+            
+            pool.start()
+            try:
+                for tid in dag.ready_tasks():
+                    self._dispatched.add(tid)
+                    self.dispatch(self.store.get_task(tid))
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    with self._dispatch_lock:
+                        pending = [tid for tid, st in dag.status.items() if st == "pending"]
+                    if not pending:
+                        break
+                    time.sleep(0.005)
+            finally:
+                pool.stop()
+        
         agg = self.aggregate(wf.id)
+        workflow_duration_ms = (time.time() - workflow_start) * 1000
+        record_workflow_duration(wf.id, workflow_duration_ms, agg.get("status", "unknown"))
+        
         agg["budget"] = tracker.snapshot()  # HERMES-09: observable budget state
         return agg
 

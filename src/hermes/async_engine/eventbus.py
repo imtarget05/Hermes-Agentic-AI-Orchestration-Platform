@@ -17,21 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from .contract import (
-    EVENT_COMPLETED,
-    EVENT_CREATED,
-    EVENT_FAILED,
-    EVENT_RETRIED,
-    EVENT_STARTED,
-)
-
-EVENT_TOPICS = {
-    EVENT_CREATED: "hermes.task.created",
-    EVENT_STARTED: "hermes.task.started",
-    EVENT_COMPLETED: "hermes.task.completed",
-    EVENT_FAILED: "hermes.task.failed",
-    EVENT_RETRIED: "hermes.task.retried",
-}
+from .contract import EVENT_TOPIC_DEFAULT, EVENT_TOPICS
 
 
 class EventBus(Protocol):
@@ -108,7 +94,7 @@ class KafkaEventBus:
 
     def emit(self, event_type: str, **fields: Any) -> dict[str, Any]:
         ev = make_event(event_type, **fields)
-        topic = self._topics.get(event_type, "hermes.task.events")
+        topic = self._topics.get(event_type, EVENT_TOPIC_DEFAULT)
         try:
             producer = self._connect()
             producer.produce(topic, key=str(fields.get("task_id", "")),
@@ -138,9 +124,8 @@ class OutboxEventBus:
         self.store = store
 
     def emit(self, event_type: str, **fields: Any) -> dict[str, Any]:
-        from .contract import EVENT_TOPICS
         ev = make_event(event_type, **fields)
-        topic = EVENT_TOPICS.get(event_type, "hermes.task.events")
+        topic = EVENT_TOPICS.get(event_type, EVENT_TOPIC_DEFAULT)
         payload = {"topic": topic, "event": ev}
         self.store.write_outbox_event(event_type, payload)
         return ev

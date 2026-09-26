@@ -23,6 +23,21 @@ EVENT_COMPLETED = "task.completed"
 EVENT_FAILED = "task.failed"
 EVENT_RETRIED = "task.retried"
 
+# Lifecycle event_type -> Kafka topic. This belongs to the contract rather than
+# to any single bus: the producers (KafkaEventBus, OutboxEventBus) and the
+# outbox relay must all agree on the topic for a given event_type, so the
+# mapping sits here beside the EVENT_* constants it maps.
+EVENT_TOPICS: dict[str, str] = {
+    EVENT_CREATED: "hermes.task.created",
+    EVENT_STARTED: "hermes.task.started",
+    EVENT_COMPLETED: "hermes.task.completed",
+    EVENT_FAILED: "hermes.task.failed",
+    EVENT_RETRIED: "hermes.task.retried",
+}
+
+# Topic for event types that are not lifecycle events in EVENT_TOPICS.
+EVENT_TOPIC_DEFAULT = "hermes.task.events"
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()

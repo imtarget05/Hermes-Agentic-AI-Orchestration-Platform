@@ -16,6 +16,8 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -96,7 +98,11 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     event_type TEXT NOT NULL,
     payload TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    published_at TEXT
+    published_at TEXT,
+    attempts INTEGER DEFAULT 0,
+    last_error TEXT,
+    next_attempt_at TEXT,
+    dead_lettered_at TEXT
 )
 """
 
@@ -106,9 +112,22 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
     created_at TEXT NOT NULL,
-    published_at TEXT
+    published_at TEXT,
+    attempts INTEGER DEFAULT 0,
+    last_error TEXT,
+    next_attempt_at TEXT,
+    dead_lettered_at TEXT
 )
 """
+
+# Relay bookkeeping columns. CREATE TABLE IF NOT EXISTS does not add columns to
+# an outbox table created before them, so init() adds any that are missing.
+_OUTBOX_RETRY_COLUMNS = (
+    ("attempts", "INTEGER DEFAULT 0"),
+    ("last_error", "TEXT"),
+    ("next_attempt_at", "TEXT"),
+    ("dead_lettered_at", "TEXT"),
+)
 
 
 class _Backend:
@@ -132,13 +151,23 @@ class _Backend:
                 + _DDL_WORKFLOWS + ";" + _DDL_EXEC_STATE + ";" + _DDL_TASK_DEPS + ";" + _DDL_IDEMPOTENCY_KEYS + ";" + _DDL_OUTBOX_SQLITE + ";"
             )
             con.execute(_DDL_TASK_RESULTS_UX)
+            self._add_missing_outbox_columns(
+                con, {r[1] for r in con.execute("PRAGMA table_info(outbox_events)")})
         else:
             for ddl in (_DDL_TASKS, _DDL_TASK_RESULTS_PG, _DDL_WORKFLOWS,
                         _DDL_EXEC_STATE, _DDL_TASK_DEPS, _DDL_IDEMPOTENCY_KEYS, _DDL_OUTBOX_PG):
                 con.execute(ddl)
             con.execute(_DDL_TASK_RESULTS_UX)
+            for col, ddl in _OUTBOX_RETRY_COLUMNS:
+                con.execute(f"ALTER TABLE outbox_events ADD COLUMN IF NOT EXISTS {col} {ddl}")
         con.commit()
         con.close()
+
+    @staticmethod
+    def _add_missing_outbox_columns(con, existing: set) -> None:
+        for col, ddl in _OUTBOX_RETRY_COLUMNS:
+            if col not in existing:
+                con.execute(f"ALTER TABLE outbox_events ADD COLUMN {col} {ddl}")
 
 
 class AsyncTaskStore:
@@ -146,27 +175,74 @@ class AsyncTaskStore:
         self.dsn = dsn if dsn is not None else os.environ.get("HERMES_DATABASE_URL", "")
         self.db_path = db_path
         self.backend = _Backend(db_path, self.dsn)
+        # Per-thread ambient transaction (worker pools share one store across
+        # threads, so the transaction must not leak between them).
+        self._local = threading.local()
         self.backend.init()
 
-    def _exec(self, sql: str, params: tuple = (), fetch: str = ""):
+    @contextmanager
+    def transaction(self):
+        """Run several store calls as one atomic unit on a single connection.
+
+        Every statement issued by the *calling thread* inside this block goes
+        through the same connection and commits together on clean exit, or rolls
+        back together on any exception. This is what makes the outbox
+        transactional: the event row and the state change it describes are
+        committed together or not at all. Re-entrant - a nested transaction()
+        joins the enclosing one rather than starting a second.
+        """
+        if self._ambient() is not None:
+            yield self._ambient()  # already inside a transaction: join it
+            return
         con = self.backend._connect()
-        cur = con.cursor()
+        self._local.con = con
+        try:
+            yield con
+            con.commit()
+        except BaseException:
+            con.rollback()
+            raise
+        finally:
+            self._local.con = None
+            con.close()
+
+    def _ambient(self):
+        """The connection owned by an enclosing transaction(), if any."""
+        return getattr(self._local, "con", None)
+
+    def _sql(self, sql: str) -> str:
+        return sql.replace("?", "%s") if self.dsn else sql
+
+    def _cursor(self, con):
         if self.dsn:
             from psycopg.rows import dict_row
-            cur = con.cursor(row_factory=dict_row)
-            sql = sql.replace("?", "%s")
-        else:
-            con.row_factory = sqlite3.Row
-            cur = con.cursor()
-        cur.execute(sql, params)
-        out = None
-        if fetch == "one":
-            out = cur.fetchone()
-        elif fetch == "all":
-            out = cur.fetchall()
-        con.commit()
-        con.close()
-        return out
+            return con.cursor(row_factory=dict_row)
+        con.row_factory = sqlite3.Row
+        return con.cursor()
+
+    def _exec(self, sql: str, params: tuple = (), fetch: str = ""):
+        """Run one statement.
+
+        Outside transaction() this opens, commits and closes its own connection.
+        Inside transaction() it joins the ambient transaction, so the caller
+        decides when the work is committed or rolled back.
+        """
+        ambient = self._ambient()
+        con = ambient if ambient is not None else self.backend._connect()
+        try:
+            cur = self._cursor(con)
+            cur.execute(self._sql(sql), params)
+            out = None
+            if fetch == "one":
+                out = cur.fetchone()
+            elif fetch == "all":
+                out = cur.fetchall()
+            if ambient is None:
+                con.commit()
+            return out
+        finally:
+            if ambient is None:
+                con.close()
 
     def _exec_count(self, sql: str, params: tuple = ()) -> int:
         """Execute a statement and return the number of rows affected.
@@ -174,16 +250,18 @@ class AsyncTaskStore:
         Used for atomic compare-and-set claims (e.g. mark_started) so a
         conditional UPDATE can report whether THIS call won the row.
         """
-        con = self.backend._connect()
-        cur = con.cursor()
-        if self.dsn:
+        ambient = self._ambient()
+        con = ambient if ambient is not None else self.backend._connect()
+        try:
             cur = con.cursor()
-            sql = sql.replace("?", "%s")
-        cur.execute(sql, params)
-        n = cur.rowcount
-        con.commit()
-        con.close()
-        return n
+            cur.execute(self._sql(sql), params)
+            n = cur.rowcount
+            if ambient is None:
+                con.commit()
+            return n
+        finally:
+            if ambient is None:
+                con.close()
 
     # ---- workflows ----
     def create_workflow(self, workflow_id: str) -> Workflow:
@@ -479,25 +557,41 @@ class AsyncTaskStore:
 
     # ---- outbox (T4.1: transactional audit) ----
     def write_outbox_event(self, event_type: str, payload: dict) -> None:
-        """Write an event to the outbox table within the current transaction.
-        
-        Call this method within the same transaction as business state changes
-        to ensure atomicity (T4.1: transactional outbox pattern).
+        """Append an event to the outbox table.
+
+        Inside a transaction() block this row is committed together with the
+        business state change it describes, so an event becomes durable exactly
+        when its state change does (T4.1: transactional outbox). Outside a
+        block it commits on its own, atomically with respect to itself only.
         """
-        import json as _json
         self._exec(
             "INSERT INTO outbox_events (event_type, payload, created_at) VALUES (?,?,?)",
-            (event_type, _json.dumps(payload, default=str), _now()),
+            (event_type, _dumps(payload), _now()),
         )
 
-    def get_unpublished_outbox_events(self, limit: int = 100) -> list[dict]:
-        """Get unpublished events from the outbox for the relay to publish."""
+    def get_unpublished_outbox_events(self, limit: int = 100,
+                                      now: str | None = None) -> list[dict]:
+        """Rows the relay still has to publish, oldest first.
+
+        Skips events whose retry backoff has not elapsed yet and events already
+        dead-lettered, so a sweep never republishes something it gave up on.
+        `now` is an ISO timestamp; it defaults to the current time so a test
+        can drive the backoff clock explicitly.
+        """
         rows = self._exec(
-            "SELECT id, event_type, payload, created_at FROM outbox_events "
-            "WHERE published_at IS NULL ORDER BY id LIMIT ?",
-            (limit,), fetch="all"
+            "SELECT id, event_type, payload, created_at, attempts, last_error, "
+            "next_attempt_at, dead_lettered_at FROM outbox_events "
+            "WHERE published_at IS NULL AND dead_lettered_at IS NULL "
+            "AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
+            "ORDER BY id LIMIT ?",
+            (now or _now(), limit), fetch="all"
         ) or []
         return [dict(r) for r in rows]
+
+    def get_outbox_event(self, event_id: int) -> dict | None:
+        """One outbox row by id whatever its publish state (relay/audit read)."""
+        row = self._exec("SELECT * FROM outbox_events WHERE id=?", (event_id,), fetch="one")
+        return dict(row) if row else None
 
     def mark_outbox_published(self, event_ids: list[int]) -> None:
         """Mark outbox events as published."""
@@ -508,6 +602,21 @@ class AsyncTaskStore:
         self._exec(
             f"UPDATE outbox_events SET published_at=? WHERE id IN ({placeholders})",
             (at, *event_ids),
+        )
+
+    def mark_outbox_retry(self, event_id: int, attempts: int, error: str,
+                          next_attempt_at: str) -> None:
+        """Record a failed publish and the earliest time the relay may retry it."""
+        self._exec(
+            "UPDATE outbox_events SET attempts=?, last_error=?, next_attempt_at=? WHERE id=?",
+            (attempts, error[:300], next_attempt_at, event_id),
+        )
+
+    def mark_outbox_dead_lettered(self, event_id: int, attempts: int, error: str) -> None:
+        """Give up on an event: the row stays in the outbox, flagged, unrepublished."""
+        self._exec(
+            "UPDATE outbox_events SET attempts=?, last_error=?, dead_lettered_at=? WHERE id=?",
+            (attempts, error[:300], _now(), event_id),
         )
 
 

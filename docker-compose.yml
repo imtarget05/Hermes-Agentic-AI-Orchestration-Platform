@@ -103,6 +103,20 @@ services:
       - rabbitmq
       - postgres
 
+  relay:
+    build: .
+    container_name: hermes-relay
+    command: python -m hermes.async_engine.cli relay
+    environment:
+      HERMES_ASYNC_MODE: rabbitmq
+      HERMES_DATABASE_URL: postgresql://hermes:hermes@postgres:5432/hermes
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      HERMES_OUTBOX_SINK: kafka
+      HERMES_RELAY_INTERVAL: "0.5"
+    depends_on:
+      - postgres
+      - kafka
+
   api:
     build: .
     container_name: hermes-api

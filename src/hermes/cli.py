@@ -436,7 +436,7 @@ def harness_check_output(output_text, domain):
 # --------------------------------------------------------------------------- #
 @cli.group("async")
 def async_cmd():
-    """Async engine (smoke test, load test, workflow, worker, orchestrator)."""
+    """Async engine (smoke test, load test, workflow, worker, orchestrator, relay)."""
 
 
 @async_cmd.command("ready")
@@ -490,6 +490,20 @@ def async_orchestrator(interval):
 
     os.environ["HERMES_ADVANCE_INTERVAL"] = str(interval)
     cmd_orchestrator()
+
+
+@async_cmd.command("relay")
+@click.option("--interval", default=0.5, show_default=True)
+@click.option("--sink", default="", help="Event sink: jsonl (default), kafka, memory")
+@click.option("--once", is_flag=True, help="Run a single sweep and exit")
+def async_relay(interval, sink, once):
+    """Long-running outbox relay (publish transactional-outbox rows)."""
+    from hermes.async_engine.cli import cmd_relay
+
+    os.environ["HERMES_RELAY_INTERVAL"] = str(interval)
+    if sink:
+        os.environ["HERMES_OUTBOX_SINK"] = sink
+    cmd_relay(once=once)
 
 
 # --------------------------------------------------------------------------- #

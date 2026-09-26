@@ -26,10 +26,16 @@ from .contract import (
     Workflow,
 )
 from .dag import TaskDAG, build_dag, resolve_ready
-from .eventbus import InMemoryEventBus, JsonlEventBus, KafkaEventBus
+from .eventbus import (
+    InMemoryEventBus,
+    JsonlEventBus,
+    KafkaEventBus,
+    OutboxEventBus,
+)
 from .loadtest import load_test_report, run_load_test
 from .metrics import NoopMetrics, PrometheusMetrics
 from .orchestrator import AsyncOrchestrator
+from .outbox import OutboxRelay
 from .retry import NonRetryableError, RetryableError, RetryPolicy
 from .store import AsyncTaskStore, init_async_db
 from .worker import Worker, WorkerPool
@@ -46,6 +52,8 @@ __all__ = [
     "MessageBus",
     "NonRetryableError",
     "NoopMetrics",
+    "OutboxEventBus",
+    "OutboxRelay",
     "PrometheusMetrics",
     "RabbitMQBus",
     "RetryPolicy",

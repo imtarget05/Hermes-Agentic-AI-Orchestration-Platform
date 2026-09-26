@@ -87,6 +87,41 @@ def cmd_orchestrator():
     advance_forever(store, bus, interval=interval)
 
 
+def cmd_relay(once: bool = False):
+    """Long-running transactional-outbox relay (Railway/docker `relay` service).
+
+    Drains outbox_events onto a live event bus: publishes each unpublished row
+    and marks it published, retrying with backoff and dead-lettering once
+    attempts run out. Without this the outbox is write-only.
+    """
+    import os
+
+    from .eventbus import InMemoryEventBus, JsonlEventBus, KafkaEventBus
+    from .outbox import OutboxRelay
+    from .store import AsyncTaskStore
+
+    dsn = os.environ.get("HERMES_DATABASE_URL") or None
+    db_path = os.environ.get("HERMES_ASYNC_DB_PATH") or tempfile.mktemp(suffix=".db")
+    store = AsyncTaskStore(db_path, dsn=dsn)
+
+    sink = os.environ.get("HERMES_OUTBOX_SINK", "jsonl")
+    if sink == "kafka":
+        events = KafkaEventBus(os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"))
+    elif sink == "memory":
+        events = InMemoryEventBus()
+    else:
+        events = JsonlEventBus(os.environ.get("HERMES_OUTBOX_JSONL", "/tmp/hermes-outbox.jsonl"))
+
+    interval = float(os.environ.get("HERMES_RELAY_INTERVAL", "0.5"))
+    batch = int(os.environ.get("HERMES_RELAY_BATCH", "100"))
+    relay = OutboxRelay(store, events, max_attempts=int(os.environ.get("HERMES_RELAY_MAX_ATTEMPTS", "3")))
+    if once:
+        print(relay.poll_once(limit=batch), flush=True)
+        return
+    print(f"outbox relay up: sink={sink} interval={interval}s batch={batch}", flush=True)
+    relay.run_forever(interval=interval, limit=batch)
+
+
 def cmd_work():
     """Long-running worker: consume from RabbitMQ + Postgres store, loop forever."""
     import os
@@ -149,6 +184,10 @@ def main(argv=None) -> None:
         cmd_work()
     elif args and args[0] == "orchestrator":
         cmd_orchestrator()
+    elif args and args[0] == "relay":
+        cmd_relay()
+    elif args and args[0] == "relay-once":
+        cmd_relay(once=True)
     elif args and args[0] == "workflow":
         import json
         agg = cmd_ready()

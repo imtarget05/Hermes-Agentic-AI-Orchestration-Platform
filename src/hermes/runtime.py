@@ -81,6 +81,7 @@ class HermesRuntime:
         svc = self._domain_svc
         if svc is None:
             import os
+
             from .advisor import AdvisoryCouncil
             from .competitor import CompetitorCollector
             from .harness import HarnessEvaluator

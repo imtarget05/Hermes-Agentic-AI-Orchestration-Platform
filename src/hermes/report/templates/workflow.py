@@ -1,9 +1,9 @@
 """Workflow execution report template — task graph, execution status."""
 from __future__ import annotations
 
-from .base import BaseTemplate
-from . import register_template
 from ..models import ReportSection, ReportTier, ReportType
+from . import register_template
+from .base import BaseTemplate
 
 
 @register_template("workflow")

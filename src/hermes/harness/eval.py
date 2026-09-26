@@ -6,8 +6,6 @@ accuracy, latency, cost, and error traces — all derived deterministically.
 """
 from __future__ import annotations
 
-import time
-
 from .schemas import EvalMetric
 
 

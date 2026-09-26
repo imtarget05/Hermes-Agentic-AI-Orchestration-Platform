@@ -19,8 +19,7 @@ from ..router import (
     RoutingPlan,
     route,
 )
-
-from .i18n import t, DEFAULT_LANG
+from .i18n import DEFAULT_LANG, t
 
 # Updated regex with full Vietnamese character support (matches router)
 _APPROVE_RE = re.compile(

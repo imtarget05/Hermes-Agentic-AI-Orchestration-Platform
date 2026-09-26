@@ -23,6 +23,17 @@ from .models import (
 )
 from .renderer import PDFRenderer
 
+__all__ = [
+    "DecisionCard",
+    "EvidenceItem",
+    "NormalizedReport",
+    "PDFRenderer",
+    "ReportSection",
+    "ReportTier",
+    "ReportType",
+    "generate_report",
+]
+
 
 def generate_report(
     report_type: str,

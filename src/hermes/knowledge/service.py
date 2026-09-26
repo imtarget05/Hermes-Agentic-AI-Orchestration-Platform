@@ -68,7 +68,7 @@ class KnowledgeService:
             if not snippet:
                 continue
             lines.append(f"- {snippet} [source={c.source_uri}]")
-            if sum(len(l) for l in lines) >= _ANSWERING_CAP:
+            if sum(len(ln) for ln in lines) >= _ANSWERING_CAP:
                 break
         lines.append("")
         lines.append("(Đây là trích đoạn gốc từ tài liệu; để xem đầy đủ hãy hỏi với từ khóa cụ thể hơn.)")

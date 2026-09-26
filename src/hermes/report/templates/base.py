@@ -9,7 +9,6 @@ from ..models import (
     EvidenceItem,
     NormalizedReport,
     ReportSection,
-    ReportTier,
     ReportType,
 )
 

@@ -152,7 +152,8 @@ def test_competitor_brief_guardrail_passes():
 
 def test_ops_http_connector_fetches_real_data():
     """Test that _http_fetch makes real HTTP GET requests and parses JSON response."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
+
     from hermes.ops.connectors import _http_fetch
 
     mock_response = MagicMock()
@@ -176,6 +177,7 @@ def test_ops_http_connector_fetches_real_data():
 def test_ops_http_connector_returns_empty_on_error():
     """Test that _http_fetch returns empty list on HTTP errors."""
     from unittest.mock import patch
+
     from hermes.ops.connectors import _http_fetch
 
     with patch("hermes.ops.connectors.httpx.get", side_effect=Exception("Connection error")):
@@ -195,6 +197,7 @@ def test_ops_http_connector_returns_empty_on_empty_url():
 def test_oauth2_token_manager_reads_env_vars():
     """Test that OAuth2TokenManager reads credentials from environment variables."""
     import os
+
     from hermes.ops.auth import OAuth2TokenManager
 
     os.environ["HERMES_XERO_CLIENT_ID"] = "test-client-id"
@@ -216,6 +219,7 @@ def test_oauth2_token_manager_reads_env_vars():
 def test_oauth2_token_manager_not_configured_without_env():
     """Test that is_configured is False when env vars are missing."""
     import os
+
     from hermes.ops.auth import OAuth2TokenManager
 
     for key in ["HERMES_XERO_CLIENT_ID", "HERMES_XERO_CLIENT_SECRET", "HERMES_XERO_REFRESH_TOKEN"]:
@@ -228,7 +232,8 @@ def test_oauth2_token_manager_not_configured_without_env():
 def test_oauth2_token_manager_refreshes_token():
     """Test that get_token exchanges refresh token for access token."""
     import os
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
+
     from hermes.ops.auth import OAuth2TokenManager
 
     os.environ["HERMES_XERO_CLIENT_ID"] = "cid"
@@ -303,8 +308,9 @@ def test_xero_map_invoices_paid_skipped():
 
 def test_xero_map_invoices_authorised_low():
     """Test that AUTHORISED invoices with future due date map to low severity."""
+    from datetime import UTC, datetime, timedelta
+
     from hermes.ops.vendors.xero import _map_invoices
-    from datetime import datetime, timedelta, UTC
 
     future_date = (datetime.now(UTC) + timedelta(days=60)).strftime("%Y-%m-%d")
 
@@ -330,8 +336,9 @@ def test_xero_map_invoices_authorised_low():
 def test_xero_connector_returns_empty_without_config():
     """Test that XeroConnector returns empty list when not configured."""
     import os
-    from hermes.ops.vendors.xero import XeroConnector
+
     from hermes.ops.schemas import OpsSource
+    from hermes.ops.vendors.xero import XeroConnector
 
     for key in ["HERMES_XERO_CLIENT_ID", "HERMES_XERO_REFRESH_TOKEN", "HERMES_XERO_TENANT_ID"]:
         os.environ.pop(key, None)
@@ -345,6 +352,7 @@ def test_xero_connector_returns_empty_without_config():
 def test_vendor_connector_takes_priority_over_generic():
     """Test that native vendor connector is used when credentials are present."""
     import os
+
     from hermes.ops.connectors import build_connector
 
     os.environ["HERMES_XERO_CLIENT_ID"] = "cid"
@@ -365,7 +373,8 @@ def test_vendor_connector_takes_priority_over_generic():
 def test_generic_fallback_when_no_vendor_creds():
     """Test that generic HTTP connector is used when no vendor credentials."""
     import os
-    from hermes.ops.connectors import build_connector, GenericConnector
+
+    from hermes.ops.connectors import build_connector
 
     for key in ["HERMES_XERO_CLIENT_ID", "HERMES_XERO_REFRESH_TOKEN"]:
         os.environ.pop(key, None)
@@ -386,7 +395,7 @@ def test_ops_connector_parses_all_fields():
 
 def test_ops_hub_with_real_http_sources():
     """Test OpsHub with sources configured with base_url (simulating env var setup)."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
 
     hub = OpsHub()
     hub.add_source(kind="crm", name="CRM", config={"base_url": "https://api.example.com/crm/attention"})
@@ -413,6 +422,7 @@ def test_ops_hub_with_real_http_sources():
 def test_competitor_watch_api_endpoint():
     """Test POST /competitor/watch endpoint adds targets correctly."""
     from fastapi.testclient import TestClient
+
     from hermes.api import app
 
     client = TestClient(app)
@@ -435,6 +445,7 @@ def test_competitor_watch_api_endpoint():
 def test_competitor_brief_api_endpoint():
     """Test GET /competitor/brief endpoint returns brief with findings."""
     from fastapi.testclient import TestClient
+
     from hermes.api import app
 
     client = TestClient(app)
@@ -461,8 +472,13 @@ def test_competitor_brief_api_endpoint():
 
 def test_competitor_full_flow_with_real_fetcher():
     """Test full competitor flow: watch → collect → brief with real HTTP fetcher."""
-    from hermes.competitor import CompetitorCollector, CompetitorTarget, build_weekly_brief
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
+
+    from hermes.competitor import (
+        CompetitorCollector,
+        CompetitorTarget,
+        build_weekly_brief,
+    )
 
     # Create collector with real HTTP fetcher (mocked at httpx level)
     collector = CompetitorCollector()  # Uses default _http_fetcher

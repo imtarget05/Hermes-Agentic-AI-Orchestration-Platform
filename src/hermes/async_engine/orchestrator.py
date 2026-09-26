@@ -20,11 +20,11 @@ from collections.abc import Callable
 from typing import Any
 
 from .budgets import (
+    DEFAULT_LIMITS,
     BudgetExceededError,
     BudgetLimits,
     CostTracker,
     validate_graph_budget,
-    DEFAULT_LIMITS,
 )
 from .contract import (
     EVENT_COMPLETED,
@@ -40,7 +40,6 @@ from .eventbus import emit_best_effort
 from .state_machine import DAGStateMachine
 from .tracing import (
     maybe_trace_workflow,
-    maybe_trace_task,
     record_task_execution,
     record_workflow_duration,
 )

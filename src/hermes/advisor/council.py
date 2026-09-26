@@ -79,10 +79,10 @@ class AdvisoryCouncil:
                 "Answer with: VERDICT:<one line> REASON:<one bullet per line>\n"
             )
             out = (self.llm.complete(prompt) or "").strip()
-            verdict_parts = [l for l in out.splitlines() if l.lower().startswith("verdict")]
-            reason_lines = [l for l in out.splitlines() if l.lower().startswith("reason")]
+            verdict_parts = [ln for ln in out.splitlines() if ln.lower().startswith("verdict")]
+            reason_lines = [ln for ln in out.splitlines() if ln.lower().startswith("reason")]
             verdict = verdict_parts[0].split(":", 1)[1].strip() if verdict_parts else out[:120]
-            reasons = [l.split(":", 1)[1].strip() for l in reason_lines]
+            reasons = [ln.split(":", 1)[1].strip() for ln in reason_lines]
             return AdvisorOpinion(
                 persona=persona.name, question=question,
                 verdict=verdict, reasons=reasons or ["(LLM trả về không đủ chi tiết)"],

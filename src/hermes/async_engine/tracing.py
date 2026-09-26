@@ -39,14 +39,20 @@ def _init_tracer() -> None:
         return
     
     try:
-        from opentelemetry import trace, metrics
-        from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry import metrics, trace
+        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+            OTLPMetricExporter,
+        )
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter,
+        )
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
-        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.trace.propagation.tracecontext import (
+            TraceContextTextMapPropagator,  # noqa: F401  # availability probe
+        )
         
         # Configure tracer provider
         trace_provider = TracerProvider()
@@ -188,14 +194,18 @@ def trace_event_bus(event_type: str, task_id: str = "") -> Generator[Any, None, 
 
 def inject_trace_context(carrier: dict[str, str]) -> None:
     """Inject current trace context into a carrier (for HTTP headers, message headers, etc.)."""
-    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+    from opentelemetry.trace.propagation.tracecontext import (
+        TraceContextTextMapPropagator,
+    )
     propagator = TraceContextTextMapPropagator()
     propagator.inject(carrier)
 
 
 def extract_trace_context(carrier: dict[str, str]) -> dict[str, str]:
     """Extract trace context from a carrier."""
-    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+    from opentelemetry.trace.propagation.tracecontext import (
+        TraceContextTextMapPropagator,
+    )
     propagator = TraceContextTextMapPropagator()
     return propagator.extract(carrier)
 

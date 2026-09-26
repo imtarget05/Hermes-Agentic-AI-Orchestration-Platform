@@ -48,13 +48,13 @@ from .metrics import (
     BaseMetrics,
     build_metrics,
 )
+from .retry import RetryPolicy, classify_failure
 from .tracing import (
     maybe_trace_task,
     maybe_trace_verification,
     record_task_duration,
     record_task_execution,
 )
-from .retry import RetryPolicy, classify_failure
 
 if TYPE_CHECKING:
     from .loops.reliability import CircuitBreaker

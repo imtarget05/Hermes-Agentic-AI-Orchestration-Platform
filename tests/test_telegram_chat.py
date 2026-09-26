@@ -271,7 +271,11 @@ def test_lang_command_toggles_language():
 
 def test_i18n_translations_exist_both_languages():
     """Test that all translation keys exist in both Vietnamese and English."""
-    from hermes.telegram_chat.i18n import TRANSLATIONS, DEFAULT_LANG, get_available_languages
+    from hermes.telegram_chat.i18n import (
+        DEFAULT_LANG,
+        TRANSLATIONS,
+        get_available_languages,
+    )
     
     # Both languages should be available
     langs = get_available_languages()

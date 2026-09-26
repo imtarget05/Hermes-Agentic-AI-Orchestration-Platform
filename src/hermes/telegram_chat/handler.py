@@ -8,13 +8,22 @@ import re
 import time
 from pathlib import Path
 
+from ..runtime import get_runtime
 from .auth import (
     check_permission,
     get_user_from_telegram,
     is_allowed,
 )
-from .intent import HELP_TEXT, MENU_HELP, build_menu_keyboard, build_reply_keyboard, classify, parse_approval_text, parse_task_id
-from .i18n import t, DEFAULT_LANG
+from .i18n import DEFAULT_LANG, t
+from .intent import (
+    HELP_TEXT,
+    MENU_HELP,
+    build_menu_keyboard,
+    build_reply_keyboard,
+    classify,
+    parse_approval_text,
+    parse_task_id,
+)
 from .service import (
     chitchat_reply,
     format_recommendation,
@@ -442,8 +451,9 @@ class ChatHandler:
 
         # Generate PDF report
         try:
-            from ..report import generate_report
             import json as _json
+
+            from ..report import generate_report
 
             # Parse recommendation
             try:
@@ -484,8 +494,8 @@ class ChatHandler:
                                         task_id=task.id)
 
             # Save PDF
-            import tempfile
             import os
+            import tempfile
             pdf_path = os.path.join(tempfile.gettempdir(),
                                     f"hermes_report_{task.id[:8]}.pdf")
             with open(pdf_path, "wb") as f:
@@ -614,8 +624,9 @@ class ChatHandler:
         return self._t(cid, "competitor_watch_added", name=name, count=len(urls))
 
     def _reply_competitor_brief(self, cid: str, text: str) -> str:
-        from ..competitor import build_weekly_brief
         import time
+
+        from ..competitor import build_weekly_brief
         svc = get_runtime().services()
         targets = svc.get("competitor_targets") or []
         if not targets:

@@ -7,8 +7,7 @@ plus HERMES_XERO_TENANT_ID for API calls.
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
-from typing import Callable
+from datetime import UTC, datetime
 
 from ..auth import OAuth2TokenManager, vendor_request
 from ..schemas import OpsAttentionItem, OpsSource, OpsSourceKind
@@ -150,4 +149,5 @@ def xero_factory() -> XeroConnector | None:
 
 # Self-register on import
 from . import register_vendor  # noqa: E402
+
 register_vendor("invoicing", xero_factory)

@@ -136,7 +136,6 @@ def scraper_run(keys, source, task_id, rag_path, ttl_days, rate_limit):
 @click.option("--ttl-days", default=30, show_default=True)
 def scraper_cleanup(rag_path, ttl_days):
     """Evict stale chunks from the RAG index."""
-    from hermes.scraper.db import ScrapedDocStore
 
     rag = rag_path or os.environ.get("HERMES_RAG_INDEX", "")
     if not rag:
@@ -385,9 +384,9 @@ def router():
 @click.option("--top-k", default=3, show_default=True)
 def router_classify(text, top_k):
     """Classify intent and show routing for a request."""
+    from hermes.config import settings
     from hermes.llm import build_llm, build_router_classifier
     from hermes.router import RoutingRegistry
-    from hermes.config import settings
 
     registry = RoutingRegistry(settings.hermes_routing_path)
     llm = build_llm(

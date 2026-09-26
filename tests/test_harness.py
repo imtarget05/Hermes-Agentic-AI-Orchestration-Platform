@@ -51,11 +51,20 @@ def test_evaluator_aggregates():
 
 
 def test_lifecycle_success_rate():
+    from hermes.harness.eval import lifecycle_success_rate
+
     store = _FakeStore([
         {"id": "a", "status": "completed"},
         {"id": "b", "status": "failed"},
     ])
-    from hermes.harness.eval import lifecycle_success_rate
+    # 1 completed / 2 terminal tasks.
+    assert lifecycle_success_rate(store) == 0.5
+    # Scoped to a subset: only task "a" is terminal and completed.
+    assert lifecycle_success_rate(store, task_ids=["a"]) == 1.0
+    # A non-terminal-only filter must not divide by zero.
+    assert lifecycle_success_rate(store, task_ids=["missing"]) == 0.0
+    # No store at all degrades to 0.0 rather than raising.
+    assert lifecycle_success_rate(None) == 0.0
 
 def test_orchestrator_records_into_eval_registry(tmp_path):
     """AsyncOrchestrator should feed task executions into the harness
